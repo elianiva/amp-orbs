@@ -21,6 +21,12 @@
 		<string>__ROOT__</string>
 		<key>AMP_ORBS_BASE_TEMPLATE</key>
 		<string>melon-orb-base-x86_64-v3</string>
+		<key>AMP_ORBS_BASE_TEMPLATE_SMALL</key>
+		<string>melon-orb-base-x86_64-v3-small</string>
+		<key>AMP_ORBS_BASE_TEMPLATE_MEDIUM</key>
+		<string>melon-orb-base-x86_64-v3</string>
+		<key>AMP_ORBS_DEFAULT_TYPE</key>
+		<string>medium</string>
 		<key>AMP_ORBS_TEMPLATE_ARCH</key>
 		<string>amd64</string>
 		<key>AMP_ORBS_TTL</key>

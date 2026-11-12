@@ -38,6 +38,19 @@ SBX = (
 BASE_TEMPLATE = os.environ.get(
     "AMP_ORBS_BASE_TEMPLATE", "melon-orb-base-x86_64-v3"
 )
+BASE_TEMPLATES = {
+    "small": os.environ.get(
+        "AMP_ORBS_BASE_TEMPLATE_SMALL", "melon-orb-base-x86_64-v3-small"
+    ),
+    "medium": os.environ.get("AMP_ORBS_BASE_TEMPLATE_MEDIUM", BASE_TEMPLATE),
+}
+TYPE_SPECS = {
+    "small": (2, 4096),
+    "medium": (4, 8192),
+}
+DEFAULT_ORB_TYPE = os.environ.get("AMP_ORBS_DEFAULT_TYPE", "medium").strip().lower()
+if DEFAULT_ORB_TYPE not in BASE_TEMPLATES:
+    DEFAULT_ORB_TYPE = "medium"
 TEMPLATE_ARCH = os.environ.get("AMP_ORBS_TEMPLATE_ARCH", "amd64")
 TTL = os.environ.get("AMP_ORBS_TTL", "24h")
 JOB_BUDGET = float(os.environ.get("AMP_ORBS_JOB_BUDGET", "280"))
@@ -371,26 +384,57 @@ def snapshot_template_name(snapshot_id: str) -> str:
 
 
 def create_sandbox(
-	orb_id: str, snapshot_id: str | None
+	orb_id: str, snapshot_id: str | None, orb_type: str
 ) -> dict[str, Any]:
 	name = sandbox_name(orb_id)
-	template = BASE_TEMPLATE
+	base_template = BASE_TEMPLATES.get(orb_type, BASE_TEMPLATES[DEFAULT_ORB_TYPE])
+	expected = TYPE_SPECS.get(orb_type)
+	shape = (
+		f"{expected[0]} vCPU/{expected[1]} MiB"
+		if expected
+		else "template default"
+	)
+	template = base_template
 	if snapshot_id:
 		snapshot_template = snapshot_template_name(snapshot_id)
-		if template_usable(snapshot_template):
-			template = snapshot_template
-			log(f"booting project snapshot {snapshot_template}")
+		snapshot_info = template_usable(snapshot_template)
+		if snapshot_info:
+			actual = (snapshot_info.get("cpus"), snapshot_info.get("memory_mib"))
+			if expected and actual != expected:
+				log(
+					f"WARNING project snapshot {snapshot_template} is "
+					f"{actual[0]} vCPU/{actual[1]} MiB, expected {shape} for "
+					f"{orb_type}; booting {base_template} and running "
+					".agents/setup"
+				)
+			else:
+				template = snapshot_template
+				log(f"booting project snapshot {snapshot_template}")
 		else:
 			log(
-				f"WARNING project snapshot {snapshot_template} is missing; "
-				f"booting {BASE_TEMPLATE} and running .agents/setup"
+				f"WARNING project snapshot {snapshot_template} is missing or "
+				f"not usable; booting {base_template} and running .agents/setup"
 			)
-	if not template_usable(template):
+	base_info = template_usable(template)
+	if not base_info:
+		hint = ""
+		if expected:
+			hint = (
+				f" build it with CPUS={expected[0]} "
+				f"MEMORY={expected[1] // 1024}g ./base/build-template.sh "
+				f"{base_template}"
+			)
 		raise DispatchError(
-			f"base template {template!r} is missing or incomplete; "
-			"run base/build-template.sh"
+			f"base template {template!r} is missing or incomplete;{hint}"
 		)
-	log(f"creating cloud sandbox {name} from {template}")
+	if expected:
+		actual = (base_info.get("cpus"), base_info.get("memory_mib"))
+		if actual != expected:
+			raise DispatchError(
+				f"base template {template!r} is {actual[0]} vCPU/"
+				f"{actual[1]} MiB, expected {shape} for orb type {orb_type}"
+			)
+	log(f"creating cloud sandbox {name} from {template} ({orb_type}: {shape})")
 	proc = run(
 		[
 			"create",
@@ -697,24 +741,40 @@ def spawn(orb_id: str) -> None:
 	token = os.environ.get("ORB_TOKEN")
 	if not token:
 		raise DispatchError("ORB_TOKEN is required for spawn")
-	orb_type = os.environ.get("ORB_TYPE")
-	if orb_type:
-		log(
-			f"ORB_TYPE={orb_type} was requested, but this provider has no "
-			"orb types; using the default base template"
-		)
+	requested_type = (os.environ.get("ORB_TYPE") or "").strip().lower()
+	orb_type = requested_type or DEFAULT_ORB_TYPE
+	if orb_type not in BASE_TEMPLATES:
+		log(f"unknown ORB_TYPE={requested_type!r}; using {DEFAULT_ORB_TYPE}")
+		orb_type = DEFAULT_ORB_TYPE
+	expected = TYPE_SPECS.get(orb_type)
+	shape = (
+		f"{expected[0]} vCPU/{expected[1]} MiB"
+		if expected
+		else "template default"
+	)
+	log(f"orb type {orb_type}: {shape}")
 	image = os.environ.get("ORB_IMAGE")
 	if image:
 		log(
 			f"ORB_IMAGE={image} ignored; Docker Cloud only accepts Docker Hub "
-			f"images, so orbs boot from template {BASE_TEMPLATE}"
+			f"images, so orbs boot from template "
+			f"{BASE_TEMPLATES.get(orb_type, BASE_TEMPLATE)}"
 		)
 	info = resolve(orb_id)
 	if info is None:
 		info = create_sandbox(
-			orb_id, os.environ.get("ORB_SNAPSHOT_ID") or None
+			orb_id,
+			os.environ.get("ORB_SNAPSHOT_ID") or None,
+			orb_type,
 		)
 	else:
+		actual = (info.get("cpus"), info.get("memory_mib"))
+		if expected and actual != expected:
+			log(
+				f"WARNING existing sandbox is {actual[0]} vCPU/"
+				f"{actual[1]} MiB, requested {orb_type} is {shape}; "
+				"keeping the existing size"
+			)
 		log(
 			f"found {info['id']} ({info.get('state')})"
 		)
