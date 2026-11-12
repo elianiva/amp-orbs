@@ -44,7 +44,7 @@ resolve_for_user() {
 	if [[ -z "$SUDO" ]]; then
 		$RUN_AS "$SERVICE_USER" -- bash -lc "command -v $1" 2>/dev/null | tail -1 || true
 	else
-		$RUN_AS "$SERVICE_USER" bash -lc "command -v $1" 2>/dev/null | tail -1 || true
+		$RUN_AS "$SERVICE_USER" -- bash -lc "command -v $1" 2>/dev/null | tail -1 || true
 	fi
 }
 
@@ -127,7 +127,7 @@ command -v systemctl >/dev/null 2>&1 || {
 }
 
 echo "==> checking the sbx account for profile $PROFILE"
-if ! $RUN_AS "$SERVICE_USER" env \
+if ! $RUN_AS "$SERVICE_USER" -- env \
 	HOME="$SERVICE_HOME" \
 	DOCKER_CONFIG="$DOCKER_CONFIG" \
 	XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
