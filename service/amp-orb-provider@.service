@@ -1,0 +1,21 @@
+[Unit]
+Description=Amp self-hosted orb provider (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__ROOT__
+EnvironmentFile=/etc/amp-orbs/%i.env
+ExecStart=__AMP_BIN__ orb provider __ROOT__/dispatch.py
+Restart=always
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=300
+StandardOutput=append:__ROOT__/logs/%i/provider.log
+StandardError=append:__ROOT__/logs/%i/provider.err.log
+
+[Install]
+WantedBy=multi-user.target

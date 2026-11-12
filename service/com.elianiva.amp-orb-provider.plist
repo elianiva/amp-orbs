@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.elianiva.amp-orb-provider</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__AMP_BIN__</string>
+		<string>orb</string>
+		<string>provider</string>
+		<string>__ROOT__/dispatch.py</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>PATH</key>
+		<string>__PATH__</string>
+		<key>AMP_ORBS_ROOT</key>
+		<string>__ROOT__</string>
+		<key>AMP_ORBS_BASE_TEMPLATE</key>
+		<string>melon-orb-base-x86_64-v3</string>
+		<key>AMP_ORBS_TEMPLATE_ARCH</key>
+		<string>amd64</string>
+		<key>AMP_ORBS_TTL</key>
+		<string>24h</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>WorkingDirectory</key>
+	<string>__ROOT__</string>
+	<key>StandardOutPath</key>
+	<string>__ROOT__/logs/provider.log</string>
+	<key>StandardErrorPath</key>
+	<string>__ROOT__/logs/provider.err.log</string>
+</dict>
+</plist>
