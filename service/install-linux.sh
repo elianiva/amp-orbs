@@ -147,6 +147,7 @@ fi
 
 echo "==> installing files"
 $SUDO install -d -m 0755 "$ROOT/logs" "$ROOT/state"
+$SUDO chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/logs" "$ROOT/state"
 $SUDO install -d -m 0755 "$ROOT/logs/$PROFILE" "$AMP_ORBS_STATE"
 $SUDO install -d -m 0700 "$DOCKER_CONFIG" "$XDG_CONFIG_HOME"
 $SUDO chown -R "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/logs/$PROFILE" "$AMP_ORBS_STATE" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME"

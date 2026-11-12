@@ -7,9 +7,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE=""
-PROVIDER="melon-sbx"
+PROVIDER="Docker"
 DOCKER_USER="elianiva"
-RUN_TEST=0
 
 usage() {
 	cat <<'EOF'
@@ -20,14 +19,12 @@ Arguments:
   profile                 systemd instance name (default: melon-sbx)
 
 Options:
-  --provider NAME         Amp provider name (default: melon-sbx)
+  --provider NAME         Amp provider name (default: Docker)
   --docker-user USER      Docker Hub username (default: elianiva)
-  --test                  Run a test thread and clean up its sandbox
   -h, --help              Show this help
 
 The script logs in sbx, fixes its local storage permissions, checks the five
-cloud templates, pauses while you add the Amp orb types, installs the systemd
-service, and checks the provider process.
+cloud templates, installs the systemd service, and checks the provider process.
 EOF
 }
 
@@ -40,10 +37,6 @@ while [[ $# -gt 0 ]]; do
 		--docker-user)
 			DOCKER_USER="$2"
 			shift 2
-			;;
-		--test)
-			RUN_TEST=1
-			shift
 			;;
 		-h | --help)
 			usage
@@ -144,14 +137,8 @@ EOF
 	exit 1
 fi
 
-echo "==> add the Amp orb types"
-cat <<EOF
-Add these types in Amp Settings > Orbs > $PROVIDER > Edit:
-  micro, small, medium, large, xl
-Set medium as the default. The CLI cannot set orb types.
-Press Enter after you add them.
-EOF
-read -r _
+echo "==> provider $PROVIDER"
+echo "Make sure the provider has the orb types in Amp Settings > Orbs."
 
 echo "==> installing the provider service"
 sudo env \
@@ -165,23 +152,5 @@ echo "==> checking the provider service"
 systemctl status "amp-orb-provider@$PROFILE.service" --no-pager
 pgrep -fl "amp orb provider" || true
 journalctl -u "amp-orb-provider@$PROFILE" -n 20 --no-pager
-
-if [[ "$RUN_TEST" -eq 1 ]]; then
-	echo "==> running a test thread"
-	amp -ox "Reply with OK." --orb-provider "$PROVIDER" --orb-size small
-	read -rp "Thread ID for the test: " THREAD_ID
-	if [[ -z "$THREAD_ID" ]]; then
-		echo "no thread ID; skipping resume and cleanup" >&2
-		exit 1
-	fi
-	"$SBX_BIN" --cloud ls
-	"$SBX_BIN" --cloud exec "amp-$THREAD_ID" bash -lc 'tail -50 /home/user/.amp-bootstrap.log'
-	read -rp "Press Enter to continue the thread and test resume: " _
-	amp threads continue "$THREAD_ID" -ox "Reply with RESUMED."
-	read -rp "Press Enter to archive the thread and remove its sandbox: " _
-	amp threads archive "$THREAD_ID" || true
-	"$SBX_BIN" --cloud rm --force "amp-$THREAD_ID" || true
-	"$SBX_BIN" --cloud ls
-fi
 
 echo "==> done"

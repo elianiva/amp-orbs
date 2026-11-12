@@ -146,9 +146,9 @@ cd ~/Development/amp-orbs
 ./service/setup-linux.sh docker-elianiva --provider Docker
 ```
 
-The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, pauses while you confirm the Amp orb types, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal. Add `--test` to run a spawn, bootstrap, resume, and cleanup test.
+The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal.
 
-The provider types cannot be set by the CLI. Add `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `Docker` → Edit, and set the default type you want.
+The provider types cannot be set by the CLI. Confirm `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `Docker` → Edit.
 
 #### Reset
 
@@ -251,7 +251,7 @@ state/melon-sbx/    state/work-sbx/
 ## Test a thread
 
 ```sh
-amp -ox "Reply with OK." --orb-provider melon-sbx
+amp -ox "Reply with OK." --orb-provider Docker
 ```
 
 Continue the same thread to test resume:
