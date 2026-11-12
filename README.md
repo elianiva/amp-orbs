@@ -15,7 +15,7 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | `service/com.elianiva.amp-orb-provider.plist` | launchd template. |
 | `service/amp-orb-provider@.service` | systemd template unit. |
 | `state/` | Durable `ORB_ID` to sandbox mapping. |
-| `logs/` | Provider logs. |
+| `logs/` | Provider logs on macOS; Linux uses the journal. |
 
 ## Base template
 
@@ -146,7 +146,7 @@ cd ~/Development/amp-orbs
 ./service/setup-linux.sh docker-elianiva --provider melon-sbx
 ```
 
-The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, pauses while you add the Amp orb types, installs the systemd service, and checks the provider process. Add `--test` to run a spawn, bootstrap, resume, and cleanup test.
+The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, pauses while you add the Amp orb types, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal. Add `--test` to run a spawn, bootstrap, resume, and cleanup test.
 
 The provider types cannot be set by the CLI. Add `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `melon-sbx` → Edit, and set `medium` as the default.
 
@@ -167,7 +167,7 @@ sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' \
   ./service/install-linux.sh melon-sbx
 ```
 
-The installer writes `/etc/amp-orbs/melon-sbx.env` with mode 600, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `logs/melon-sbx/provider.err.log` and `journalctl -u amp-orb-provider@melon-sbx`.
+The installer writes `/etc/amp-orbs/melon-sbx.env` with mode 600, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `journalctl -u amp-orb-provider@melon-sbx`.
 
 The base templates are account-scoped. Build all five in the same profile:
 
@@ -187,7 +187,7 @@ Create one provider token per Amp account or workspace and pass it to that profi
 
 `sbx` has no `--profile` flag. Give each Docker account its own `DOCKER_CONFIG` and `XDG_CONFIG_HOME`. The Linux installer defaults to `$HOME/.docker/<profile>` and `$HOME/.config/<profile>`, and the preflight checks that login. If a particular `sbx` build still shares a session, run each profile as a separate OS user with `SERVICE_USER=<user>`.
 
-Run one `amp-orb-provider@<profile>.service` per profile. Each instance has its own token, `sbx` config, state directory, logs, and base template. Never run two providers for the same token. `--allow-multiple` is only for dispatch programs that share state.
+Run one `amp-orb-provider@<profile>.service` per profile. Each instance has its own token, `sbx` config, state directory, journal logs, and base template. Never run two providers for the same token. `--allow-multiple` is only for dispatch programs that share state.
 
 #### Example: two profiles
 
@@ -226,11 +226,10 @@ systemctl status amp-orb-provider@melon-sbx.service
 systemctl status amp-orb-provider@work-sbx.service
 ```
 
-Their state and logs are separate:
+Their state directories are separate:
 
 ```text
 state/melon-sbx/    state/work-sbx/
-logs/melon-sbx/     logs/work-sbx/
 ```
 
 ## Test a thread
@@ -249,7 +248,7 @@ A thread's sandbox is named `amp-<thread id>`. Check it with `sbx --cloud ls` an
 
 ## Troubleshooting
 
-- Read `logs/provider.err.log` on macOS. On Linux, read `logs/<profile>/provider.err.log` and `journalctl -u amp-orb-provider@<profile>`.
+- Read `logs/provider.err.log` on macOS. On Linux, read `journalctl -u amp-orb-provider@<profile>`.
 - Read the orb's bootstrap log inside the sandbox:
   `sbx --cloud exec <sandbox> bash -lc 'tail -50 /home/user/.amp-bootstrap.log'`
 - Run `sbx --cloud diagnose` to check Docker sign-in, cloud connectivity, and account access.

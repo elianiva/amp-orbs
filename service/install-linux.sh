@@ -59,6 +59,13 @@ if [[ -z "$SBX_BIN" ]]; then
 	exit 1
 fi
 
+# systemd runs as init_t and SELinux denies executing a user_home_t binary.
+# Install the Amp binary under /usr/local/bin so it gets bin_t.
+if [[ "$AMP_BIN" != "/usr/local/bin/amp" ]]; then
+	$SUDO install -m 0755 "$AMP_BIN" /usr/local/bin/amp
+	AMP_BIN="/usr/local/bin/amp"
+fi
+
 TOKEN="${AMP_ORB_PROVIDER_TOKEN:-}"
 if [[ -z "$TOKEN" ]]; then
 	if [[ -t 0 ]]; then
@@ -158,7 +165,7 @@ Profile $PROFILE is installed.
   service: $LABEL
   env:     $ENV_FILE
   state:   $AMP_ORBS_STATE
-  logs:    $ROOT/logs/$PROFILE/provider.log
+  logs:    journalctl -u $LABEL
 
 The base templates are account-scoped. Build all five in this profile's sbx account:
   export DOCKER_CONFIG=$DOCKER_CONFIG

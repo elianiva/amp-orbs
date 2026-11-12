@@ -14,8 +14,8 @@ Restart=always
 RestartSec=10
 KillMode=mixed
 TimeoutStopSec=300
-StandardOutput=append:__ROOT__/logs/%i/provider.log
-StandardError=append:__ROOT__/logs/%i/provider.err.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
