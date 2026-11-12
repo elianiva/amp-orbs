@@ -144,6 +144,42 @@ Create one provider token per Amp account or workspace and pass it to that profi
 
 Run one `amp-orb-provider@<profile>.service` per profile. Each instance has its own token, `sbx` config, state directory, logs, and base template. Never run two providers for the same token. `--allow-multiple` is only for dispatch programs that share state.
 
+#### Example: two profiles
+
+This example uses the installer's default config directories and two provider tokens. The template name is the same in both `sbx` accounts because templates are account-scoped.
+
+```sh
+# Profile 1: personal Docker account
+export DOCKER_CONFIG="$HOME/.docker/melon-sbx"
+export XDG_CONFIG_HOME="$HOME/.config/melon-sbx"
+echo "$PERSONAL_DOCKER_PAT" | sbx login --username <personal-docker-user> --password-stdin
+./base/build-template.sh
+sudo env AMP_ORB_PROVIDER_TOKEN="$MELON_SBX_TOKEN" \
+  ./service/install-linux.sh melon-sbx
+
+# Profile 2: work Docker account
+export DOCKER_CONFIG="$HOME/.docker/work-sbx"
+export XDG_CONFIG_HOME="$HOME/.config/work-sbx"
+echo "$WORK_DOCKER_PAT" | sbx login --username <work-docker-user> --password-stdin
+./base/build-template.sh
+sudo env AMP_ORB_PROVIDER_TOKEN="$WORK_SBX_TOKEN" \
+  ./service/install-linux.sh work-sbx
+```
+
+Both services run at the same time:
+
+```sh
+systemctl status amp-orb-provider@melon-sbx.service
+systemctl status amp-orb-provider@work-sbx.service
+```
+
+Their state and logs are separate:
+
+```text
+state/melon-sbx/    state/work-sbx/
+logs/melon-sbx/     logs/work-sbx/
+```
+
 ## Test a thread
 
 ```sh
