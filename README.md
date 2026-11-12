@@ -137,6 +137,21 @@ The installer renders the launchd plist with this checkout's path and starts the
 
 ### Linux
 
+#### One-command setup
+
+Run this as the service user on the Linux host:
+
+```sh
+cd ~/Development/amp-orbs
+./service/setup-linux.sh docker-elianiva --provider melon-sbx
+```
+
+The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, pauses while you add the Amp orb types, installs the systemd service, and checks the provider process. Add `--test` to run a spawn, bootstrap, resume, and cleanup test.
+
+The provider types cannot be set by the CLI. Add `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `melon-sbx` → Edit, and set `medium` as the default.
+
+#### Manual setup
+
 Log in `sbx` for the profile first. Use the same config directories that the installer uses:
 
 ```sh
