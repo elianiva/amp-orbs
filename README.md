@@ -143,12 +143,28 @@ Run this as the service user on the Linux host:
 
 ```sh
 cd ~/Development/amp-orbs
-./service/setup-linux.sh docker-elianiva --provider melon-sbx
+./service/setup-linux.sh docker-elianiva --provider Docker
 ```
 
-The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, pauses while you add the Amp orb types, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal. Add `--test` to run a spawn, bootstrap, resume, and cleanup test.
+The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, pauses while you confirm the Amp orb types, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal. Add `--test` to run a spawn, bootstrap, resume, and cleanup test.
 
-The provider types cannot be set by the CLI. Add `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `melon-sbx` → Edit, and set `medium` as the default.
+The provider types cannot be set by the CLI. Add `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `Docker` → Edit, and set the default type you want.
+
+#### Reset
+
+Remove one profile:
+
+```sh
+./service/reset-linux.sh docker-elianiva
+```
+
+Remove every profile, the systemd unit, and `/usr/local/bin/amp`:
+
+```sh
+./service/reset-linux.sh --all
+```
+
+The script stops and disables the service, then removes the env file, state, logs, and the profile's `sbx` config. It does not delete the Amp provider, cloud templates, or cloud sandboxes. Remove test sandboxes with `sbx --cloud rm --force` and manage the provider in Settings → Orbs.
 
 #### Manual setup
 
