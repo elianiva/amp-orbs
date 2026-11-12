@@ -122,27 +122,37 @@ templates=(
 	"melon-orb-base-x86_64-v3-large"
 	"melon-orb-base-x86_64-v3-xl"
 )
-missing=0
+missing_templates=()
 for template in "${templates[@]}"; do
 	if "$SBX_BIN" --cloud template inspect "$template" >/dev/null 2>&1; then
 		echo "ok: $template"
 	else
 		echo "missing: $template" >&2
-		missing=1
+		missing_templates+=("$template")
 	fi
 done
-if [[ "$missing" -eq 1 ]]; then
-	cat >&2 <<EOF
-
-Build the missing templates in this sbx account:
-  cd "$ROOT"
-  ./base/build-template.sh
-  CPUS=1 MEMORY=2g ./base/build-template.sh melon-orb-base-x86_64-v3-micro
-  CPUS=2 MEMORY=4g ./base/build-template.sh melon-orb-base-x86_64-v3-small
-  CPUS=8 MEMORY=16g ./base/build-template.sh melon-orb-base-x86_64-v3-large
-  CPUS=16 MEMORY=32g ./base/build-template.sh melon-orb-base-x86_64-v3-xl
-EOF
-	exit 1
+if [[ ${#missing_templates[@]} -gt 0 ]]; then
+	echo "==> building missing templates in profile $PROFILE"
+	export SBX_BIN
+	for template in "${missing_templates[@]}"; do
+		case "$template" in
+			melon-orb-base-x86_64-v3)
+				./base/build-template.sh
+				;;
+			*-micro)
+				CPUS=1 MEMORY=2g ./base/build-template.sh "$template"
+				;;
+			*-small)
+				CPUS=2 MEMORY=4g ./base/build-template.sh "$template"
+				;;
+			*-large)
+				CPUS=8 MEMORY=16g ./base/build-template.sh "$template"
+				;;
+			*-xl)
+				CPUS=16 MEMORY=32g ./base/build-template.sh "$template"
+				;;
+		esac
+	done
 fi
 
 echo "==> provider $PROVIDER"

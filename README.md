@@ -146,7 +146,7 @@ cd ~/Development/amp-orbs
 ./service/setup-linux.sh docker-personal --provider Docker
 ```
 
-The script prompts for the Docker Hub username unless you pass `--docker-user`, then for the Docker PAT. It fixes `sbx` local storage permissions, logs in the profile, checks the five templates, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal.
+The script prompts for the Docker Hub username unless you pass `--docker-user`, then for the Docker PAT. It fixes `sbx` local storage permissions, logs in the profile, builds any missing templates, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal.
 
 The provider types cannot be set by the CLI. Confirm `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `Docker` → Edit.
 
@@ -185,7 +185,7 @@ sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' \
 
 The installer writes `/etc/amp-orbs/melon-sbx.env` with mode 600, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `journalctl -u amp-orb-provider@melon-sbx`.
 
-The base templates are account-scoped. Build all five in the same profile:
+The setup builds any missing templates in the profile. To build them manually:
 
 ```sh
 export DOCKER_CONFIG="$HOME/.docker/melon-sbx"
