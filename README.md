@@ -143,10 +143,10 @@ Run this as the service user on the Linux host:
 
 ```sh
 cd ~/Development/amp-orbs
-./service/setup-linux.sh docker-elianiva --provider Docker
+./service/setup-linux.sh docker-personal --provider Docker
 ```
 
-The script fixes `sbx` local storage permissions, logs in the profile, checks the five templates, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal.
+The script prompts for the Docker Hub username unless you pass `--docker-user`, then for the Docker PAT. It fixes `sbx` local storage permissions, logs in the profile, checks the five templates, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal.
 
 The provider types cannot be set by the CLI. Confirm `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `Docker` → Edit.
 
@@ -155,7 +155,7 @@ The provider types cannot be set by the CLI. Confirm `micro`, `small`, `medium`,
 Remove one profile:
 
 ```sh
-./service/reset-linux.sh docker-elianiva
+./service/reset-linux.sh docker-personal
 ```
 
 Remove every profile, the systemd unit, and `/usr/local/bin/amp`:

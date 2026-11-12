@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE=""
 PROVIDER="Docker"
-DOCKER_USER="elianiva"
+DOCKER_USER=""
 
 usage() {
 	cat <<'EOF'
@@ -20,7 +20,7 @@ Arguments:
 
 Options:
   --provider NAME         Amp provider name (default: Docker)
-  --docker-user USER      Docker Hub username (default: elianiva)
+  --docker-user USER      Docker Hub username (prompts if omitted)
   -h, --help              Show this help
 
 The script logs in sbx, fixes its local storage permissions, checks the five
@@ -58,6 +58,14 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 PROFILE="${PROFILE:-melon-sbx}"
+
+if [[ -z "$DOCKER_USER" ]]; then
+	read -rp "Docker Hub username: " DOCKER_USER
+fi
+if [[ -z "$DOCKER_USER" ]]; then
+	echo "Docker Hub username is required" >&2
+	exit 1
+fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
 	echo "run this script as the service user, not root" >&2
