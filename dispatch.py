@@ -39,14 +39,26 @@ BASE_TEMPLATE = os.environ.get(
     "AMP_ORBS_BASE_TEMPLATE", "melon-orb-base-x86_64-v3"
 )
 BASE_TEMPLATES = {
+    "micro": os.environ.get(
+        "AMP_ORBS_BASE_TEMPLATE_MICRO", "melon-orb-base-x86_64-v3-micro"
+    ),
     "small": os.environ.get(
         "AMP_ORBS_BASE_TEMPLATE_SMALL", "melon-orb-base-x86_64-v3-small"
     ),
     "medium": os.environ.get("AMP_ORBS_BASE_TEMPLATE_MEDIUM", BASE_TEMPLATE),
+    "large": os.environ.get(
+        "AMP_ORBS_BASE_TEMPLATE_LARGE", "melon-orb-base-x86_64-v3-large"
+    ),
+    "xl": os.environ.get(
+        "AMP_ORBS_BASE_TEMPLATE_XL", "melon-orb-base-x86_64-v3-xl"
+    ),
 }
 TYPE_SPECS = {
+    "micro": (1, 2048),
     "small": (2, 4096),
     "medium": (4, 8192),
+    "large": (8, 16384),
+    "xl": (16, 32768),
 }
 DEFAULT_ORB_TYPE = os.environ.get("AMP_ORBS_DEFAULT_TYPE", "medium").strip().lower()
 if DEFAULT_ORB_TYPE not in BASE_TEMPLATES:

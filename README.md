@@ -19,7 +19,7 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 
 ## Base template
 
-`melon-orb-base-x86_64-v3` is the medium Docker Cloud template, built from Docker's `shell` sandbox on `linux/amd64`. It has 4 vCPU and 8 GiB of memory. `melon-orb-base-x86_64-v3-small` is the small template, built from the same provisioning script with 2 vCPU and 4 GiB.
+`melon-orb-base-x86_64-v3` is the medium Docker Cloud template, built from Docker's `shell` sandbox on `linux/amd64`. It has 4 vCPU and 8 GiB of memory. The other variants use `melon-orb-base-x86_64-v3-micro`, `melon-orb-base-x86_64-v3-small`, `melon-orb-base-x86_64-v3-large`, and `melon-orb-base-x86_64-v3-xl`, built from the same provisioning script.
 
 Amp hardcodes `/home/user` and commands such as `install -o user -g user`. The template creates `/home/user` owned by the default `agent` account (uid 1000) and a `user` group with gid 1000. Bootstrap runs as `agent` with `HOME=/home/user`, so Amp's paths and ownership commands resolve correctly. The managed `user` account's passwd entry is reset at boot, so the dispatcher re-applies the home and group on every spawn.
 
@@ -49,22 +49,29 @@ Then set the type template variables in the service environment and restart the 
 
 ## Orb types
 
-The provider exposes two variants:
+The provider exposes five variants:
 
 | Type | Shape | Base template |
 | --- | --- | --- |
+| `micro` | 1 vCPU / 2 GiB | `melon-orb-base-x86_64-v3-micro` |
 | `small` | 2 vCPU / 4 GiB | `melon-orb-base-x86_64-v3-small` |
 | `medium` | 4 vCPU / 8 GiB | `melon-orb-base-x86_64-v3` |
+| `large` | 8 vCPU / 16 GiB | `melon-orb-base-x86_64-v3-large` |
+| `xl` | 16 vCPU / 32 GiB | `melon-orb-base-x86_64-v3-xl` |
 
-Add `small` and `medium` under **Orb types** in the provider's Edit dialog in Amp settings, and select `medium` as the default. The CLI has no command for this setting.
+Add `micro`, `small`, `medium`, `large`, and `xl` under **Orb types** in the provider's Edit dialog in Amp settings, and select `medium` as the default. The CLI has no command for this setting.
 
-Build the small template once in each `sbx` account:
+Build the templates once in each `sbx` account. The default build is medium:
 
 ```sh
+./base/build-template.sh
+CPUS=1 MEMORY=2g ./base/build-template.sh melon-orb-base-x86_64-v3-micro
 CPUS=2 MEMORY=4g ./base/build-template.sh melon-orb-base-x86_64-v3-small
+CPUS=8 MEMORY=16g ./base/build-template.sh melon-orb-base-x86_64-v3-large
+CPUS=16 MEMORY=32g ./base/build-template.sh melon-orb-base-x86_64-v3-xl
 ```
 
-`ORB_TYPE` selects the template. If it is unset, the dispatcher uses `medium`. If a project snapshot has a different CPU or memory shape, the dispatcher ignores it for that type, boots the matching base template, and runs `.agents/setup`.
+`ORB_TYPE` selects one of `micro`, `small`, `medium`, `large`, or `xl`. If it is unset, the dispatcher uses `medium`. If a project snapshot has a different CPU or memory shape, the dispatcher ignores it for that type, boots the matching base template, and runs `.agents/setup`.
 
 ## Dispatch behavior
 
@@ -81,7 +88,7 @@ Amp runs `dispatch.py` once per job. The program reads `ORB_OPERATION`, `ORB_ID`
 
 `ORB_IMAGE` is logged and ignored. Docker Cloud only accepts images from Docker Hub (`docker.io`, `registry-1.docker.io`, `index.docker.io`) and `dhi.io`; Amp's default image is on `us-central1-docker.pkg.dev`. The base template replaces it.
 
-`ORB_TYPE` selects `small` or `medium`. An unset value uses the default type, `medium`. Unknown values log a warning and use `medium`.
+`ORB_TYPE` selects one of `micro`, `small`, `medium`, `large`, or `xl`. An unset value uses the default type, `medium`. Unknown values log a warning and use `medium`.
 
 ### pause
 
@@ -147,17 +154,16 @@ sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' \
 
 The installer writes `/etc/amp-orbs/melon-sbx.env` with mode 600, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `logs/melon-sbx/provider.err.log` and `journalctl -u amp-orb-provider@melon-sbx`.
 
-The base templates are account-scoped. Build both in the same profile:
+The base templates are account-scoped. Build all five in the same profile:
 
 ```sh
-DOCKER_CONFIG="$HOME/.docker/melon-sbx" \
-XDG_CONFIG_HOME="$HOME/.config/melon-sbx" \
+export DOCKER_CONFIG="$HOME/.docker/melon-sbx"
+export XDG_CONFIG_HOME="$HOME/.config/melon-sbx"
 ./base/build-template.sh
-
-DOCKER_CONFIG="$HOME/.docker/melon-sbx" \
-XDG_CONFIG_HOME="$HOME/.config/melon-sbx" \
-CPUS=2 MEMORY=4g \
-./base/build-template.sh melon-orb-base-x86_64-v3-small
+CPUS=1 MEMORY=2g ./base/build-template.sh melon-orb-base-x86_64-v3-micro
+CPUS=2 MEMORY=4g ./base/build-template.sh melon-orb-base-x86_64-v3-small
+CPUS=8 MEMORY=16g ./base/build-template.sh melon-orb-base-x86_64-v3-large
+CPUS=16 MEMORY=32g ./base/build-template.sh melon-orb-base-x86_64-v3-xl
 ```
 
 ### Multiple accounts on one VPS
@@ -173,12 +179,19 @@ Run one `amp-orb-provider@<profile>.service` per profile. Each instance has its 
 This example uses the installer's default config directories and two provider tokens. The template name is the same in both `sbx` accounts because templates are account-scoped.
 
 ```sh
+build_templates() {
+  ./base/build-template.sh
+  CPUS=1 MEMORY=2g ./base/build-template.sh melon-orb-base-x86_64-v3-micro
+  CPUS=2 MEMORY=4g ./base/build-template.sh melon-orb-base-x86_64-v3-small
+  CPUS=8 MEMORY=16g ./base/build-template.sh melon-orb-base-x86_64-v3-large
+  CPUS=16 MEMORY=32g ./base/build-template.sh melon-orb-base-x86_64-v3-xl
+}
+
 # Profile 1: personal Docker account
 export DOCKER_CONFIG="$HOME/.docker/melon-sbx"
 export XDG_CONFIG_HOME="$HOME/.config/melon-sbx"
 echo "$PERSONAL_DOCKER_PAT" | sbx login --username <personal-docker-user> --password-stdin
-./base/build-template.sh
-CPUS=2 MEMORY=4g ./base/build-template.sh melon-orb-base-x86_64-v3-small
+build_templates
 sudo env AMP_ORB_PROVIDER_TOKEN="$MELON_SBX_TOKEN" \
   ./service/install-linux.sh melon-sbx
 
@@ -186,8 +199,7 @@ sudo env AMP_ORB_PROVIDER_TOKEN="$MELON_SBX_TOKEN" \
 export DOCKER_CONFIG="$HOME/.docker/work-sbx"
 export XDG_CONFIG_HOME="$HOME/.config/work-sbx"
 echo "$WORK_DOCKER_PAT" | sbx login --username <work-docker-user> --password-stdin
-./base/build-template.sh
-CPUS=2 MEMORY=4g ./base/build-template.sh melon-orb-base-x86_64-v3-small
+build_templates
 sudo env AMP_ORB_PROVIDER_TOKEN="$WORK_SBX_TOKEN" \
   ./service/install-linux.sh work-sbx
 ```
@@ -226,7 +238,7 @@ A thread's sandbox is named `amp-<thread id>`. Check it with `sbx --cloud ls` an
 - Read the orb's bootstrap log inside the sandbox:
   `sbx --cloud exec <sandbox> bash -lc 'tail -50 /home/user/.amp-bootstrap.log'`
 - Run `sbx --cloud diagnose` to check Docker sign-in, cloud connectivity, and account access.
-- Check both base templates with `sbx --cloud template inspect melon-orb-base-x86_64-v3 --format json` and `sbx --cloud template inspect melon-orb-base-x86_64-v3-small --format json`.
+- Check the templates with `sbx --cloud template ls` and `sbx --cloud template inspect <name> --format json`.
 - If a sandbox is stuck in `hibernating`, wait for the workflow to settle and retry `sbx --cloud rm --force`.
 
 ## Docker Cloud limitations
