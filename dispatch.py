@@ -66,18 +66,12 @@ JOB_START = 0.0
 BOOTSTRAP = r"""
 set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-# The image's agent environment: PATH, non-interactive pagers and editors,
-# mise, and Chrome. Amp and every command it runs inherit it.
-if [ -r /etc/profile.d/amp-orb.sh ]; then
-	. /etc/profile.d/amp-orb.sh
-fi
 printf '\n=== spawn %s ===\n' "$(date -Is)" >> "$HOME/.amp-bootstrap.log"
-printf 'pid1=%s shm=%s nofile=%s inotify_watches=%s browser_args=%s mem=%s earlyoom=%s\n' \
+printf 'pid1=%s shm=%s nofile=%s inotify_watches=%s mem=%s earlyoom=%s\n' \
 	"$(ps -o comm= -p 1 2>/dev/null || echo '?')" \
 	"$(df -h --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ' || echo '?')" \
 	"$(ulimit -n)" \
 	"$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo '?')" \
-	"${AGENT_BROWSER_ARGS:-none}" \
 	"$(free -m 2>/dev/null | awk '/^Mem:/ {print $7 "/" $2 "M"}' || echo '?')" \
 	"$(pgrep -x earlyoom >/dev/null 2>&1 && echo on || echo off)" >> "$HOME/.amp-bootstrap.log"
 # A token belongs to one spawn job and expires after 15 minutes, so an older
@@ -88,35 +82,15 @@ for _ in $(seq 1 20); do
 	sleep 0.2
 done
 pkill -9 -x amp 2>/dev/null || true
-# tini -s becomes the subreaper for Amp's process tree, so orphaned dev servers,
-# Chrome helpers, and test runners do not pile up as zombies when PID 1 does
-# not reap them.
-reaper=()
-if command -v tini >/dev/null 2>&1; then
-	reaper=(tini -s --)
-fi
-setsid "${reaper[@]}" amp orb bootstrap </dev/null >>"$HOME/.amp-bootstrap.log" 2>&1 &
+setsid amp orb bootstrap </dev/null >>"$HOME/.amp-bootstrap.log" 2>&1 &
 echo "bootstrap started pid $!"
 """
 
 LAUNCHER = r"""
 set -euo pipefail
-# Amp hardcodes /home/user and runs commands such as `install -o user -g user`.
-# The image gives uid 1000 a user name, group, and home. Re-apply them in case
-# the sandbox runtime rewrote /etc/passwd or /etc/group at boot. Only fix the
-# top-level directories: a recursive chown would walk every checkout.
-sudo install -d -o 1000 -g 1000 /home/user /home/user/.amp /home/user/.amp/bin \
-	/home/user/.local /home/user/.local/bin /home/user/.local/state /home/user/go /home/user/go/bin
-if getent group user >/dev/null 2>&1; then
-	sudo sed -i -E 's|^user:x:[0-9]+:|user:x:1000:|' /etc/group
-else
-	echo 'user:x:1000:' | sudo tee -a /etc/group >/dev/null
-fi
-getent passwd user >/dev/null 2>&1 ||
-	echo 'user:x:1000:1000::/home/user:/bin/bash' | sudo tee -a /etc/passwd >/dev/null
 # Dev servers and file watchers run out of inotify watches and file descriptors
 # at the default limits, and Chrome crashes when Docker's 64 MB /dev/shm fills.
-# Raise what the VM allows. agent-env.sh falls back for anything still small.
+# Raise what the VM allows.
 sudo sysctl -q -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=1024 \
 	>/dev/null 2>&1 || true
 shm_kb=$(df -k --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ')
@@ -132,7 +106,7 @@ ulimit -n "$(ulimit -Hn)" 2>/dev/null || ulimit -n 1048576 2>/dev/null || true
 if command -v earlyoom >/dev/null 2>&1 && ! pgrep -x earlyoom >/dev/null 2>&1; then
 	sudo setsid earlyoom -m 8,4 -r 0 -p \
 		--prefer '^(chrome|chromium|chrome-headless|headless_shell)' \
-		--avoid '^(amp|tini|earlyoom|sshd|dockerd|containerd)$' \
+		--avoid '^(amp|earlyoom|sshd|dockerd|containerd)$' \
 		</dev/null >>/home/user/.amp-earlyoom.log 2>&1 &
 fi
 cat > /home/user/.amp-orb-bootstrap.sh <<'AMP_ORB_BOOTSTRAP'

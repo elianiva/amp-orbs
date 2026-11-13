@@ -7,8 +7,7 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | Path | Purpose |
 | --- | --- |
 | `dispatch.py` | Amp dispatch program. Handles `spawn`, `pause`, and `delete` jobs. |
-| `image/Dockerfile` | The orb base image. You build it and push it to Docker Hub. |
-| `image/agent-env.sh` | Agent environment for login shells and the Amp bootstrap. |
+| `image/Dockerfile` | Amp's orb image with the `agent` account Docker Sandboxes needs. You build it and push it to Docker Hub. |
 | `service/install.sh` | Installs the provider service for macOS or Linux. |
 | `service/install-macos.sh` | launchd installer. |
 | `service/install-linux.sh` | systemd installer, one profile per instance. |
@@ -19,83 +18,43 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 
 ## Orb image
 
-Every orb boots from one image, built from `image/Dockerfile` and published to Docker Hub. The dispatcher creates each sandbox with `sbx --cloud create --image-ref <image> --cpus N --memory M`, so one image serves every orb type and no per-size cloud templates exist.
+Orbs boot from Amp's own orb image, `us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb:latest`. It has the Amp CLI, agent-browser with Chrome, Node, Bun, Python, uv, gh, nix, and the tools for portals, Terminal, and Desktop.
 
-Build and push it:
+Docker Sandboxes Cloud cannot boot that image directly, for two reasons:
+
+- `sbx --cloud create --image-ref` pulls only from Docker Hub (`docker.io`) and `dhi.io`. Amp publishes its image on Google Artifact Registry.
+- Docker Sandboxes runs commands as an `agent` account with uid 1000 and home `/home/agent`. Amp's image names uid 1000 `user`.
+
+`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom, described under VM limits. You push the result to Docker Hub:
 
 ```sh
-docker buildx build --platform linux/amd64 \
+docker buildx build --pull --platform linux/amd64 \
   -t docker.io/<user>/amp-orb:2026-11-13 -t docker.io/<user>/amp-orb:latest \
   --push image/
 ```
 
-Docker Cloud pulls inline images only from Docker Hub (`docker.io`) and `dhi.io`. Put the full reference, with the `docker.io/` prefix, in `AMP_ORBS_IMAGE`. `sbx` does not add the registry for you.
+For arm64, add `--build-arg BASE_IMAGE=us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` and `--platform linux/arm64`.
 
-A new tag only affects new orbs. Existing sandboxes keep their disk and do not pick up the new image. Pin a dated tag in `AMP_ORBS_IMAGE` if you want to roll out deliberately, then restart the provider after you change it.
+Put the full reference, with the `docker.io/` prefix, in `AMP_ORBS_IMAGE`. `sbx` does not add the registry for you. The dispatcher creates each sandbox with `sbx --cloud create --image-ref <image> --cpus N --memory M`, so one image serves every orb type.
 
-The build args pin tool versions: `NODE_VERSION`, `PNPM_VERSION`, `BUN_VERSION`, `GO_VERSION`, `TYPST_VERSION`, `YQ_VERSION`, `MISE_VERSION`, `AST_GREP_VERSION`, and `AGENT_BROWSER_VERSION` (default `latest`). Override one with `--build-arg`. The last build step runs every tool and fails the build if one is missing.
-
-The image extends `docker.io/sbx/shell:latest`, Docker's hardened Debian 13 shell image. That base supplies the `agent` account (uid 1000, passwordless sudo), git, GitHub CLI, ripgrep, jq, tmux, tini, Python with uv, and Docker Engine with the compose and buildx plugins. The Dockerfile adds:
-
-- Node.js 26.13.1 (LTS), npm, pnpm 12.18, and Bun 1.4.4.
-- Go 1.27.4.
-- Typst 0.15.1 and yq 4.
-- mise, for dev tools the image does not ship, such as Rust, Java, or Ruby.
-- ast-grep, for structural code search.
-- agent-browser (latest at build time) with its Chrome and Chrome's system libraries, plus Liberation and Noto color emoji fonts for screenshots. `/usr/local/bin/google-chrome` links to that Chrome.
-- ffmpeg and ImageMagick for screenshots and recordings.
-- Build tools and CLI utilities: gcc, g++, make, pkg-config, libssl-dev, libsqlite3-dev, fd, bat, fzf, shellcheck, sqlite3, git-lfs, rsync, strace, and lsof.
-- The Amp CLI.
-
-`vim` is not included. The hardened base strips its binary, and apt cannot reinstall it.
-
-### Agent environment
-
-Amp hardcodes `/home/user` and runs commands such as `install -o user -g user`. The image gives uid 1000 a second passwd and group name, `user`, with home `/home/user`. `agent` stays the first uid 1000 entry, so Docker Sandboxes and sudo still resolve the uid to `agent`. Bootstrap runs as uid 1000 with `HOME=/home/user`. The dispatcher re-applies the `user` entries on every spawn in case the sandbox runtime rewrites `/etc/passwd` or `/etc/group` at boot.
-
-Amp and agent-browser's Chrome are installed under `/home/user`, the home Amp runs with. Global npm packages go to `/usr/local/share/npm-global`, which uid 1000 owns, so `npm i -g` and `agent-browser upgrade` work without sudo. `go install` writes to `/home/user/go/bin`. All of these directories are on `PATH`.
-
-`image/agent-env.sh` holds the agent environment. The image installs it as `/etc/profile.d/amp-orb.sh`, so login shells load it, and the bootstrap script sources it before it starts `amp orb bootstrap`, so Amp and every command it runs get the same settings:
-
-- `PATH`, `LANG=C.UTF-8`, and the npm prefix.
-- No pagers, editors, or prompts, because agents have no TTY: `PAGER`, `GIT_PAGER`, `MANPAGER`, and `SYSTEMD_PAGER` are `cat`, `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, `PIP_NO_INPUT=1`, and npm's fund, audit, and update notices are off. `CI` stays unset, because it changes how some test runners behave.
-- `CHROME_PATH` and `PUPPETEER_EXECUTABLE_PATH` point at agent-browser's Chrome, and `PUPPETEER_SKIP_DOWNLOAD=true`, so Puppeteer and Playwright suites reuse it.
-- `AGENT_BROWSER_IDLE_TIMEOUT_MS=900000`. agent-browser stops its daemon and Chrome after 15 minutes without a command, instead of its default 1 hour, so a browser an agent forgets does not hold memory. The next command starts a new browser without the old tabs or cookies. Set the variable yourself to change it, or to `0` to turn it off. It does not affect Chrome that Playwright, Puppeteer, or a script starts directly. earlyoom covers those.
-- mise settings, described below.
-- The proxy CA and `/dev/shm` fallbacks, described under VM limits.
-
-The image removes the base image's login banner, because agents read shell output.
-
-### Dev tools on demand with mise
-
-The image ships Node, Bun, Go, and Python. For anything else, the agent runs mise:
-
-```sh
-mise use -g rust@1.95      # global, for every repository in the orb
-mise use java@21           # writes mise.toml in the current repository
-```
-
-mise's shims come first on `PATH`. A repository that pins a version in `mise.toml` or `.tool-versions` gets that version inside the repository and the image's version elsewhere. mise keeps its data in `/home/user/.local/share/mise`, so tools that `.agents/setup` installs end up in the project snapshot and later orbs skip the download. `MISE_YES=1` answers mise's prompts.
+Amp updates its image often. Rebuild with `--pull` to pick up a new version. A new tag only affects new orbs. Existing sandboxes keep their disk and do not pick up the new image. Pin a dated tag in `AMP_ORBS_IMAGE` if you want to roll out deliberately, then restart the provider after you change it.
 
 ### VM limits
 
 Each spawn tunes the sandbox before it starts Amp:
 
 - It raises `fs.inotify.max_user_watches` to 524288 and `max_user_instances` to 1024, so dev servers and file watchers do not run out of watches.
-- It grows `/dev/shm` to 2 GiB. Docker's default is 64 MB, and Chrome tabs crash with "Target closed" when it fills. If the VM does not allow the remount, `agent-env.sh` sets `AGENT_BROWSER_ARGS=--disable-dev-shm-usage` so Chrome uses `/tmp` instead. A value you set yourself is kept.
+- It grows `/dev/shm` to 2 GiB. Docker's default is 64 MB, and Chrome tabs crash with "Target closed" when it fills.
 - It raises the open-file limit to the hard limit.
-- It starts Amp under `tini -s`, which reaps orphaned processes such as Chrome helpers and dev servers when PID 1 does not.
-- It starts `earlyoom`, which kills a process when available memory falls to 8%, and sends SIGKILL at 4%. On a VM without swap and without earlyoom, a browser that an agent leaves running can fill memory, and the kernel then thrashes for minutes before its own OOM killer acts. During that time Amp misses its heartbeats, and the thread reports "Orb reconnect attempts were exhausted". earlyoom picks Chrome processes first. It kills `amp`, `tini`, `sshd`, `dockerd`, or `containerd` only when no other process uses a meaningful amount of memory. A killed Chrome tab or browser fails that one command, and the orb stays connected.
+- It starts `earlyoom`, which kills a process when available memory falls to 8%, and sends SIGKILL at 4%. On a VM without swap and without earlyoom, a browser that an agent leaves running can fill memory, and the kernel then thrashes for minutes before its own OOM killer acts. During that time Amp misses its heartbeats, and the thread reports "Orb reconnect attempts were exhausted". Amp's image protects Amp through systemd, which does not manage a Docker Sandboxes VM. earlyoom picks Chrome processes first. It kills `amp`, `sshd`, `dockerd`, or `containerd` only when no other process uses a meaningful amount of memory. A killed Chrome tab or browser fails that one command, and the orb stays connected.
 
-Every step that the VM refuses is skipped. The bootstrap log records PID 1, the `/dev/shm` size, the file and inotify limits, the browser args, the available memory, and whether earlyoom runs, for each spawn. earlyoom logs each kill to `/home/user/.amp-earlyoom.log`:
+Every step that the VM refuses is skipped. The bootstrap log records PID 1, the `/dev/shm` size, the file and inotify limits, the available memory, and whether earlyoom runs, for each spawn. earlyoom logs each kill to `/home/user/.amp-earlyoom.log`:
 
 ```sh
 sbx --cloud exec <sandbox> bash -lc 'grep ^pid1= /home/user/.amp-bootstrap.log | tail -1; grep -A1 "low memory" /home/user/.amp-earlyoom.log | tail'
 ```
 
 If earlyoom kills Chrome often, use a larger orb type.
-
-Docker Sandboxes can route HTTPS through a TLS-inspecting proxy and publish its CA as `PROXY_CA_CERT_B64`. Chrome on Linux ignores the system CA bundle. When that variable is set, `agent-env.sh` writes the CA to `~/.cache/sbx-proxy-ca.crt` and exports `AGENT_BROWSER_CA_CERT`, so agent-browser trusts the proxy.
 
 ## Orb types
 
@@ -126,7 +85,7 @@ Amp runs `dispatch.py` once per job. The program reads `ORB_OPERATION`, `ORB_ID`
 5. Kill any previous `amp orb bootstrap` process and start a new one as `agent` with `HOME=/home/user` and this job's `ORB_TOKEN`. Tokens are single-use and expire after 15 minutes, so reusing a bootstrap from an earlier spawn is not valid.
 6. Wait four seconds and fail the job if the bootstrap process is gone. The error includes the tail of `/home/user/.amp-bootstrap.log` from the sandbox.
 
-`ORB_IMAGE` is logged and ignored. Docker Cloud only accepts images from Docker Hub (`docker.io`, `registry-1.docker.io`, `index.docker.io`) and `dhi.io`, and Amp's default image is on `us-central1-docker.pkg.dev`. `AMP_ORBS_IMAGE` replaces it.
+`ORB_IMAGE` is logged and ignored. Docker Cloud only accepts images from Docker Hub (`docker.io`, `registry-1.docker.io`, `index.docker.io`) and `dhi.io`, and Amp's default image is on `us-central1-docker.pkg.dev`. `AMP_ORBS_IMAGE` replaces it with the Docker Hub copy that `image/Dockerfile` builds.
 
 `ORB_TYPE` selects one of `micro`, `small`, `medium`, `large`, or `xl`. An unset value uses the default type, `medium`. Unknown values log a warning and use `medium`.
 
