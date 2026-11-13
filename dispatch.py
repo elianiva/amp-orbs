@@ -72,12 +72,14 @@ if [ -r /etc/profile.d/amp-orb.sh ]; then
 	. /etc/profile.d/amp-orb.sh
 fi
 printf '\n=== spawn %s ===\n' "$(date -Is)" >> "$HOME/.amp-bootstrap.log"
-printf 'pid1=%s shm=%s nofile=%s inotify_watches=%s browser_args=%s\n' \
+printf 'pid1=%s shm=%s nofile=%s inotify_watches=%s browser_args=%s mem=%s earlyoom=%s\n' \
 	"$(ps -o comm= -p 1 2>/dev/null || echo '?')" \
 	"$(df -h --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ' || echo '?')" \
 	"$(ulimit -n)" \
 	"$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo '?')" \
-	"${AGENT_BROWSER_ARGS:-none}" >> "$HOME/.amp-bootstrap.log"
+	"${AGENT_BROWSER_ARGS:-none}" \
+	"$(free -m 2>/dev/null | awk '/^Mem:/ {print $7 "/" $2 "M"}' || echo '?')" \
+	"$(pgrep -x earlyoom >/dev/null 2>&1 && echo on || echo off)" >> "$HOME/.amp-bootstrap.log"
 # A token belongs to one spawn job and expires after 15 minutes, so an older
 # bootstrap must not be reused after a pause.
 pkill -x amp 2>/dev/null || true
@@ -124,6 +126,15 @@ if [ "$shm_kb" -lt 2097152 ]; then
 		sudo mount -t tmpfs -o size=2g,mode=1777,nosuid,nodev tmpfs /dev/shm 2>/dev/null || true
 fi
 ulimit -n "$(ulimit -Hn)" 2>/dev/null || ulimit -n 1048576 2>/dev/null || true
+# Without swap, when a leaked browser fills memory, the kernel thrashes
+# for minutes before its OOM killer acts, and Amp misses its heartbeats until
+# the orb is declared lost. earlyoom kills earlier: Chrome first, Amp last.
+if command -v earlyoom >/dev/null 2>&1 && ! pgrep -x earlyoom >/dev/null 2>&1; then
+	sudo setsid earlyoom -m 8,4 -r 0 -p \
+		--prefer '^(chrome|chromium|chrome-headless|headless_shell)' \
+		--avoid '^(amp|tini|earlyoom|sshd|dockerd|containerd)$' \
+		</dev/null >>/home/user/.amp-earlyoom.log 2>&1 &
+fi
 cat > /home/user/.amp-orb-bootstrap.sh <<'AMP_ORB_BOOTSTRAP'
 __BOOTSTRAP__
 AMP_ORB_BOOTSTRAP

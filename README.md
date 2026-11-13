@@ -60,6 +60,7 @@ Amp and agent-browser's Chrome are installed under `/home/user`, the home Amp ru
 - `PATH`, `LANG=C.UTF-8`, and the npm prefix.
 - No pagers, editors, or prompts, because agents have no TTY: `PAGER`, `GIT_PAGER`, `MANPAGER`, and `SYSTEMD_PAGER` are `cat`, `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, `PIP_NO_INPUT=1`, and npm's fund, audit, and update notices are off. `CI` stays unset, because it changes how some test runners behave.
 - `CHROME_PATH` and `PUPPETEER_EXECUTABLE_PATH` point at agent-browser's Chrome, and `PUPPETEER_SKIP_DOWNLOAD=true`, so Puppeteer and Playwright suites reuse it.
+- `AGENT_BROWSER_IDLE_TIMEOUT_MS=900000`. agent-browser stops its daemon and Chrome after 15 minutes without a command, instead of its default 1 hour, so a browser an agent forgets does not hold memory. The next command starts a new browser without the old tabs or cookies. Set the variable yourself to change it, or to `0` to turn it off. It does not affect Chrome that Playwright, Puppeteer, or a script starts directly. earlyoom covers those.
 - mise settings, described below.
 - The proxy CA and `/dev/shm` fallbacks, described under VM limits.
 
@@ -84,12 +85,15 @@ Each spawn tunes the sandbox before it starts Amp:
 - It grows `/dev/shm` to 2 GiB. Docker's default is 64 MB, and Chrome tabs crash with "Target closed" when it fills. If the VM does not allow the remount, `agent-env.sh` sets `AGENT_BROWSER_ARGS=--disable-dev-shm-usage` so Chrome uses `/tmp` instead. A value you set yourself is kept.
 - It raises the open-file limit to the hard limit.
 - It starts Amp under `tini -s`, which reaps orphaned processes such as Chrome helpers and dev servers when PID 1 does not.
+- It starts `earlyoom`, which kills a process when available memory falls to 8%, and sends SIGKILL at 4%. On a VM without swap and without earlyoom, a browser that an agent leaves running can fill memory, and the kernel then thrashes for minutes before its own OOM killer acts. During that time Amp misses its heartbeats, and the thread reports "Orb reconnect attempts were exhausted". earlyoom picks Chrome processes first. It kills `amp`, `tini`, `sshd`, `dockerd`, or `containerd` only when no other process uses a meaningful amount of memory. A killed Chrome tab or browser fails that one command, and the orb stays connected.
 
-Every step that the VM refuses is skipped. The bootstrap log records PID 1, the `/dev/shm` size, the file and inotify limits, and the browser args for each spawn:
+Every step that the VM refuses is skipped. The bootstrap log records PID 1, the `/dev/shm` size, the file and inotify limits, the browser args, the available memory, and whether earlyoom runs, for each spawn. earlyoom logs each kill to `/home/user/.amp-earlyoom.log`:
 
 ```sh
-sbx --cloud exec <sandbox> bash -lc 'grep ^pid1= /home/user/.amp-bootstrap.log | tail -1'
+sbx --cloud exec <sandbox> bash -lc 'grep ^pid1= /home/user/.amp-bootstrap.log | tail -1; grep -A1 "low memory" /home/user/.amp-earlyoom.log | tail'
 ```
+
+If earlyoom kills Chrome often, use a larger orb type.
 
 Docker Sandboxes can route HTTPS through a TLS-inspecting proxy and publish its CA as `PROXY_CA_CERT_B64`. Chrome on Linux ignores the system CA bundle. When that variable is set, `agent-env.sh` writes the CA to `~/.cache/sbx-proxy-ca.crt` and exports `AGENT_BROWSER_CA_CERT`, so agent-browser trusts the proxy.
 

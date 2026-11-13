@@ -28,6 +28,11 @@ export CHROME_PATH=/usr/local/bin/google-chrome
 export PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/google-chrome
 export PUPPETEER_SKIP_DOWNLOAD=true
 
+# Agents often leave a browser open when they move on. agent-browser shuts its
+# daemon and Chrome down after this much inactivity (its default is 1h). The
+# next command starts a fresh browser, without the old tabs and cookies.
+export AGENT_BROWSER_IDLE_TIMEOUT_MS="${AGENT_BROWSER_IDLE_TIMEOUT_MS:-900000}"
+
 # Chrome keeps renderer memory in /dev/shm, and tabs crash when it fills up.
 # The dispatcher grows it at spawn. If it is still under 1 GiB, make Chrome
 # use /tmp instead. Re-check a fallback this file set earlier, because a shell

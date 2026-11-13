@@ -37,7 +37,7 @@ apt-get install -y --no-install-recommends \
 	build-essential pkg-config libssl-dev libsqlite3-dev \
 	ca-certificates curl wget gnupg openssh-client git-lfs \
 	fd-find bat fzf shellcheck sqlite3 tree less \
-	zip unzip xz-utils zstd file rsync procps psmisc lsof strace \
+	zip unzip xz-utils zstd file rsync procps psmisc lsof strace earlyoom \
 	ffmpeg imagemagick fonts-liberation fonts-noto-color-emoji
 ln -sf /usr/bin/fdfind /usr/local/bin/fd
 ln -sf /usr/bin/batcat /usr/local/bin/bat
@@ -124,7 +124,7 @@ COPY --chmod=0755 agent-env.sh /etc/profile.d/amp-orb.sh
 RUN <<'EOF'
 export HOME=/home/user
 for tool in amp agent-browser node npm pnpm bun go python3 uv typst git gh rg fd bat jq yq \
-	fzf tmux gcc make docker sqlite3 shellcheck ffmpeg magick mise ast-grep google-chrome tini; do
+	fzf tmux gcc make docker sqlite3 shellcheck ffmpeg magick mise ast-grep google-chrome tini earlyoom; do
 	command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
 done
 amp --version
