@@ -148,9 +148,19 @@ The mapping file is `state/orbs/<sha256(ORB_ID)[:24]>.json`. It contains the ori
 
 ## Expiration
 
-Sandboxes are created with `--ttl 24h --on-timeout stop`. A running sandbox that is left idle stops after 24 hours instead of being deleted. A stopped sandbox has no running TTL; resuming it starts a new TTL period. The provider's pause job usually stops an idle orb much sooner.
+Sandboxes are created with `--ttl 24h --on-timeout stop`, so Docker Cloud stops an expired sandbox instead of deleting it. Its default is one hour with a server-chosen action, which can delete a parked orb.
 
-Docker Cloud's default is one hour with a server-chosen action, which is too short and can delete a parked orb. The explicit TTL and `stop` action avoid that.
+Docker documents that the TTL restarts when a stopped sandbox resumes, but not how long the new period is. The cloud API has a separate `resume_timeout` that `sbx` cannot set. `sbx --cloud ttl` refuses any extension that would end more than 24 hours after creation.
+
+In case a resumed sandbox gets a shorter period than `--ttl`, after every spawn the dispatcher runs `sbx --cloud ttl +<gap>` to push the expiry to 24 hours after creation, less two minutes, and logs the result:
+
+```text
+sandbox expires at 2026-11-14T19:02:43Z, in 21.0h; Docker's 24h ceiling is 2026-11-14T19:04:43Z
+```
+
+A sandbox older than 24 hours cannot be extended. Each wake then lasts only the resume timeout, and the log says `WARNING this orb stops at ...`. When Docker stops the sandbox, Amp loses the orb until the next message sends a new spawn, which resumes it with its disk intact.
+
+Check a sandbox's expiry with `sbx --cloud ttl <name> --json`.
 
 ## Register and run the provider
 

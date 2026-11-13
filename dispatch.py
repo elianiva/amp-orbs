@@ -22,6 +22,7 @@ import sys
 import time
 import traceback
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,9 @@ DEFAULT_ORB_TYPE = os.environ.get("AMP_ORBS_DEFAULT_TYPE", "medium").strip().low
 if DEFAULT_ORB_TYPE not in TYPE_SPECS:
     DEFAULT_ORB_TYPE = "medium"
 TTL = os.environ.get("AMP_ORBS_TTL", "24h")
+# Docker Cloud never lets an expiry pass 24 hours after creation.
+TTL_CEILING = 24 * 3600
+TTL_MARGIN = 120
 JOB_BUDGET = float(os.environ.get("AMP_ORBS_JOB_BUDGET", "280"))
 SNAPSHOT_BUDGET = float(os.environ.get("AMP_ORBS_SNAPSHOT_BUDGET", "120"))
 PAUSE_WAIT = float(os.environ.get("AMP_ORBS_PAUSE_WAIT", "150"))
@@ -565,6 +569,61 @@ def ensure_running(sandbox_id: str) -> bool:
 	return True
 
 
+def parse_time(value: Any) -> float | None:
+	"""Parse an RFC 3339 timestamp from sbx into epoch seconds."""
+	if not isinstance(value, str) or not value:
+		return None
+	text = value.strip().replace("Z", "+00:00")
+	# Python accepts at most six fractional digits; sbx may send nine.
+	text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+	try:
+		return datetime.fromisoformat(text).timestamp()
+	except ValueError:
+		return None
+
+
+def clock(epoch: float) -> str:
+	return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def refresh_ttl(sandbox_id: str) -> None:
+	"""Push a running sandbox's expiry to Docker Cloud's 24-hour ceiling.
+
+	`create --ttl` sets only the first period. A stopped sandbox that resumes
+	gets the server's resume timeout instead, so without this an orb stops that
+	long after every wake, however busy it is. `sbx ttl` cannot extend past 24
+	hours after creation, so an older sandbox keeps the resume timeout.
+	"""
+	info = inspect_sandbox(sandbox_id) or {}
+	created = parse_time(info.get("created_at"))
+	expires = parse_time(info.get("expires_at"))
+	if created is None or expires is None:
+		log(
+			f"WARNING cannot read the TTL of {sandbox_id}: created_at="
+			f"{info.get('created_at')!r} expires_at={info.get('expires_at')!r}"
+		)
+		return
+	ceiling = created + TTL_CEILING
+	gap = int(ceiling - TTL_MARGIN - expires)
+	if gap >= 60:
+		proc = run(["ttl", f"+{gap}s", sandbox_id], timeout=60, check=False)
+		if proc.returncode == 0:
+			expires = parse_time((inspect_sandbox(sandbox_id) or {}).get("expires_at")) or expires
+		else:
+			log(f"WARNING could not extend the TTL: {tail(proc.stderr or proc.stdout)}")
+	now = time.time()
+	log(
+		f"sandbox expires at {clock(expires)}, in {(expires - now) / 3600:.1f}h; "
+		f"Docker's 24h ceiling is {clock(ceiling)}"
+	)
+	if expires - now < 2 * 3600:
+		log(
+			f"WARNING this orb stops at {clock(expires)}: the sandbox was created "
+			f"{(now - created) / 3600:.1f}h ago and Docker Cloud cannot extend it "
+			"past 24 hours after creation"
+		)
+
+
 def start_bootstrap(
 	sandbox_id: str, token: str, amp_url: str | None
 ) -> None:
@@ -797,6 +856,10 @@ def spawn(orb_id: str) -> None:
 		)
 	sandbox_id = str(info["id"])
 	ensure_running(sandbox_id)
+	try:
+		refresh_ttl(sandbox_id)
+	except DispatchError as error:
+		log(f"WARNING TTL refresh failed: {error}")
 	start_bootstrap(
 		sandbox_id,
 		token,
