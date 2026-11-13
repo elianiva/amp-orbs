@@ -2,7 +2,9 @@
 # Install one Linux systemd instance of the Amp orb provider.
 #
 # Usage:
-#   sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' ./service/install-linux.sh <profile>
+#   sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' \
+#     AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:latest \
+#     ./service/install-linux.sh <profile>
 #
 # Each profile gets its own sbx config, state directory, logs, and token, so one
 # VPS can serve several Docker and Amp accounts.
@@ -80,14 +82,13 @@ fi
 DOCKER_CONFIG="${DOCKER_CONFIG:-$SERVICE_HOME/.docker/$PROFILE}"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$SERVICE_HOME/.config/$PROFILE}"
 AMP_ORBS_STATE="${AMP_ORBS_STATE:-$ROOT/state/$PROFILE}"
-AMP_ORBS_BASE_TEMPLATE="${AMP_ORBS_BASE_TEMPLATE:-melon-orb-base-x86_64-v3}"
-AMP_ORBS_BASE_TEMPLATE_MICRO="${AMP_ORBS_BASE_TEMPLATE_MICRO:-melon-orb-base-x86_64-v3-micro}"
-AMP_ORBS_BASE_TEMPLATE_SMALL="${AMP_ORBS_BASE_TEMPLATE_SMALL:-melon-orb-base-x86_64-v3-small}"
-AMP_ORBS_BASE_TEMPLATE_MEDIUM="${AMP_ORBS_BASE_TEMPLATE_MEDIUM:-$AMP_ORBS_BASE_TEMPLATE}"
-AMP_ORBS_BASE_TEMPLATE_LARGE="${AMP_ORBS_BASE_TEMPLATE_LARGE:-melon-orb-base-x86_64-v3-large}"
-AMP_ORBS_BASE_TEMPLATE_XL="${AMP_ORBS_BASE_TEMPLATE_XL:-melon-orb-base-x86_64-v3-xl}"
+AMP_ORBS_IMAGE="${AMP_ORBS_IMAGE:-}"
+if [[ -z "$AMP_ORBS_IMAGE" ]]; then
+	echo "set AMP_ORBS_IMAGE to the published orb image, such as docker.io/<user>/amp-orb:latest" >&2
+	exit 1
+fi
+AMP_ORBS_PLATFORM="${AMP_ORBS_PLATFORM:-linux/amd64}"
 AMP_ORBS_DEFAULT_TYPE="${AMP_ORBS_DEFAULT_TYPE:-medium}"
-AMP_ORBS_TEMPLATE_ARCH="${AMP_ORBS_TEMPLATE_ARCH:-amd64}"
 AMP_ORBS_TTL="${AMP_ORBS_TTL:-24h}"
 
 WORK="$(mktemp -d)"
@@ -106,14 +107,9 @@ PATH=$SERVICE_HOME/.amp/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 AMP_ORB_PROVIDER_TOKEN=$TOKEN
 AMP_ORBS_ROOT=$ROOT
 AMP_ORBS_STATE=$AMP_ORBS_STATE
-AMP_ORBS_BASE_TEMPLATE=$AMP_ORBS_BASE_TEMPLATE
-AMP_ORBS_BASE_TEMPLATE_MICRO=$AMP_ORBS_BASE_TEMPLATE_MICRO
-AMP_ORBS_BASE_TEMPLATE_SMALL=$AMP_ORBS_BASE_TEMPLATE_SMALL
-AMP_ORBS_BASE_TEMPLATE_MEDIUM=$AMP_ORBS_BASE_TEMPLATE_MEDIUM
-AMP_ORBS_BASE_TEMPLATE_LARGE=$AMP_ORBS_BASE_TEMPLATE_LARGE
-AMP_ORBS_BASE_TEMPLATE_XL=$AMP_ORBS_BASE_TEMPLATE_XL
+AMP_ORBS_IMAGE=$AMP_ORBS_IMAGE
+AMP_ORBS_PLATFORM=$AMP_ORBS_PLATFORM
 AMP_ORBS_DEFAULT_TYPE=$AMP_ORBS_DEFAULT_TYPE
-AMP_ORBS_TEMPLATE_ARCH=$AMP_ORBS_TEMPLATE_ARCH
 AMP_ORBS_TTL=$AMP_ORBS_TTL
 AMP_ORBS_SBX=$SBX_BIN
 DOCKER_CONFIG=$DOCKER_CONFIG
@@ -168,14 +164,8 @@ Profile $PROFILE is installed.
   state:   $AMP_ORBS_STATE
   logs:    journalctl -u $LABEL
 
-The base templates are account-scoped. Build all five in this profile's sbx account:
-  export DOCKER_CONFIG=$DOCKER_CONFIG
-  export XDG_CONFIG_HOME=$XDG_CONFIG_HOME
-  $ROOT/base/build-template.sh
-  CPUS=1 MEMORY=2g $ROOT/base/build-template.sh melon-orb-base-x86_64-v3-micro
-  CPUS=2 MEMORY=4g $ROOT/base/build-template.sh melon-orb-base-x86_64-v3-small
-  CPUS=8 MEMORY=16g $ROOT/base/build-template.sh melon-orb-base-x86_64-v3-large
-  CPUS=16 MEMORY=32g $ROOT/base/build-template.sh melon-orb-base-x86_64-v3-xl
+New orbs boot from $AMP_ORBS_IMAGE. To roll out a new image, push it and
+update AMP_ORBS_IMAGE in $ENV_FILE, then restart the service.
 
 Follow logs with:
   journalctl -u $LABEL -f

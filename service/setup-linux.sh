@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE=""
 PROVIDER="Docker"
 DOCKER_USER=""
+IMAGE=""
 
 usage() {
 	cat <<'EOF'
@@ -21,10 +22,13 @@ Arguments:
 Options:
   --provider NAME         Amp provider name (default: Docker)
   --docker-user USER      Docker Hub username (prompts if omitted)
+  --image REF             Orb image on Docker Hub
+                          (default: docker.io/<docker-user>/amp-orb:latest)
   -h, --help              Show this help
 
-The script logs in sbx, fixes its local storage permissions, checks the five
-cloud templates, installs the systemd service, and checks the provider process.
+The script logs in sbx, fixes its local storage permissions, installs the
+systemd service, and checks the provider process. Build and push the orb image
+from image/Dockerfile first.
 EOF
 }
 
@@ -36,6 +40,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--docker-user)
 			DOCKER_USER="$2"
+			shift 2
+			;;
+		--image)
+			IMAGE="$2"
 			shift 2
 			;;
 		-h | --help)
@@ -66,6 +74,7 @@ if [[ -z "$DOCKER_USER" ]]; then
 	echo "Docker Hub username is required" >&2
 	exit 1
 fi
+IMAGE="${IMAGE:-docker.io/$DOCKER_USER/amp-orb:latest}"
 
 if [[ "$(id -u)" -eq 0 ]]; then
 	echo "run this script as the service user, not root" >&2
@@ -114,54 +123,14 @@ printf '%s' "$SBX_PAT" | "$SBX_BIN" login --username "$DOCKER_USER" --password-s
 unset SBX_PAT
 "$SBX_BIN" --cloud diagnose
 
-echo "==> checking the five cloud templates"
-templates=(
-	"melon-orb-base-x86_64-v3"
-	"melon-orb-base-x86_64-v3-micro"
-	"melon-orb-base-x86_64-v3-small"
-	"melon-orb-base-x86_64-v3-large"
-	"melon-orb-base-x86_64-v3-xl"
-)
-missing_templates=()
-for template in "${templates[@]}"; do
-	if "$SBX_BIN" --cloud template inspect "$template" >/dev/null 2>&1; then
-		echo "ok: $template"
-	else
-		echo "missing: $template" >&2
-		missing_templates+=("$template")
-	fi
-done
-if [[ ${#missing_templates[@]} -gt 0 ]]; then
-	echo "==> building missing templates in profile $PROFILE"
-	export SBX_BIN
-	for template in "${missing_templates[@]}"; do
-		case "$template" in
-			melon-orb-base-x86_64-v3)
-				./base/build-template.sh
-				;;
-			*-micro)
-				CPUS=1 MEMORY=2g ./base/build-template.sh "$template"
-				;;
-			*-small)
-				CPUS=2 MEMORY=4g ./base/build-template.sh "$template"
-				;;
-			*-large)
-				CPUS=8 MEMORY=16g ./base/build-template.sh "$template"
-				;;
-			*-xl)
-				CPUS=16 MEMORY=32g ./base/build-template.sh "$template"
-				;;
-		esac
-	done
-fi
-
-echo "==> provider $PROVIDER"
+echo "==> provider $PROVIDER, image $IMAGE"
 echo "Make sure the provider has the orb types in Amp Settings > Orbs."
 
 echo "==> installing the provider service"
 sudo env \
 	AMP_BIN="$AMP_BIN" \
 	SBX_BIN="$SBX_BIN" \
+	AMP_ORBS_IMAGE="$IMAGE" \
 	DOCKER_CONFIG="$DOCKER_CONFIG" \
 	XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
 	"$ROOT/service/install-linux.sh" "$PROFILE"

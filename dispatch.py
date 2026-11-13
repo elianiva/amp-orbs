@@ -35,24 +35,10 @@ SBX = (
     or shutil.which("sbx")
     or ("/opt/homebrew/bin/sbx" if sys.platform == "darwin" else "/usr/local/bin/sbx")
 )
-BASE_TEMPLATE = os.environ.get(
-    "AMP_ORBS_BASE_TEMPLATE", "melon-orb-base-x86_64-v3"
-)
-BASE_TEMPLATES = {
-    "micro": os.environ.get(
-        "AMP_ORBS_BASE_TEMPLATE_MICRO", "melon-orb-base-x86_64-v3-micro"
-    ),
-    "small": os.environ.get(
-        "AMP_ORBS_BASE_TEMPLATE_SMALL", "melon-orb-base-x86_64-v3-small"
-    ),
-    "medium": os.environ.get("AMP_ORBS_BASE_TEMPLATE_MEDIUM", BASE_TEMPLATE),
-    "large": os.environ.get(
-        "AMP_ORBS_BASE_TEMPLATE_LARGE", "melon-orb-base-x86_64-v3-large"
-    ),
-    "xl": os.environ.get(
-        "AMP_ORBS_BASE_TEMPLATE_XL", "melon-orb-base-x86_64-v3-xl"
-    ),
-}
+# The orb base image, built from image/Dockerfile and published to Docker Hub.
+IMAGE = os.environ.get("AMP_ORBS_IMAGE", "").strip()
+PLATFORM = os.environ.get("AMP_ORBS_PLATFORM", "linux/amd64")
+TEMPLATE_ARCH = PLATFORM.removeprefix("linux/")
 TYPE_SPECS = {
     "micro": (1, 2048),
     "small": (2, 4096),
@@ -61,9 +47,8 @@ TYPE_SPECS = {
     "xl": (16, 32768),
 }
 DEFAULT_ORB_TYPE = os.environ.get("AMP_ORBS_DEFAULT_TYPE", "medium").strip().lower()
-if DEFAULT_ORB_TYPE not in BASE_TEMPLATES:
+if DEFAULT_ORB_TYPE not in TYPE_SPECS:
     DEFAULT_ORB_TYPE = "medium"
-TEMPLATE_ARCH = os.environ.get("AMP_ORBS_TEMPLATE_ARCH", "amd64")
 TTL = os.environ.get("AMP_ORBS_TTL", "24h")
 JOB_BUDGET = float(os.environ.get("AMP_ORBS_JOB_BUDGET", "280"))
 SNAPSHOT_BUDGET = float(os.environ.get("AMP_ORBS_SNAPSHOT_BUDGET", "120"))
@@ -77,7 +62,18 @@ JOB_START = 0.0
 BOOTSTRAP = r"""
 set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+# The image's agent environment: PATH, non-interactive pagers and editors,
+# mise, and Chrome. Amp and every command it runs inherit it.
+if [ -r /etc/profile.d/amp-orb.sh ]; then
+	. /etc/profile.d/amp-orb.sh
+fi
 printf '\n=== spawn %s ===\n' "$(date -Is)" >> "$HOME/.amp-bootstrap.log"
+printf 'pid1=%s shm=%s nofile=%s inotify_watches=%s browser_args=%s\n' \
+	"$(ps -o comm= -p 1 2>/dev/null || echo '?')" \
+	"$(df -h --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ' || echo '?')" \
+	"$(ulimit -n)" \
+	"$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo '?')" \
+	"${AGENT_BROWSER_ARGS:-none}" >> "$HOME/.amp-bootstrap.log"
 # A token belongs to one spawn job and expires after 15 minutes, so an older
 # bootstrap must not be reused after a pause.
 pkill -x amp 2>/dev/null || true
@@ -86,24 +82,44 @@ for _ in $(seq 1 20); do
 	sleep 0.2
 done
 pkill -9 -x amp 2>/dev/null || true
-setsid bash -c 'exec amp orb bootstrap' </dev/null >>"$HOME/.amp-bootstrap.log" 2>&1 &
+# tini -s becomes the subreaper for Amp's process tree, so orphaned dev servers,
+# Chrome helpers, and test runners do not pile up as zombies when PID 1 does
+# not reap them.
+reaper=()
+if command -v tini >/dev/null 2>&1; then
+	reaper=(tini -s --)
+fi
+setsid "${reaper[@]}" amp orb bootstrap </dev/null >>"$HOME/.amp-bootstrap.log" 2>&1 &
 echo "bootstrap started pid $!"
 """
 
 LAUNCHER = r"""
 set -euo pipefail
 # Amp hardcodes /home/user and runs commands such as `install -o user -g user`.
-# The managed user account's passwd entry is reset at boot, so use the default
-# agent account with HOME=/home/user and make the user group resolve to gid 1000.
-sudo mkdir -p /home/user/.amp/bin /home/user/.local/bin /home/user/.local/state /home/user/go/bin
-sudo chown -R 1000:1000 /home/user
+# The image gives uid 1000 a user name, group, and home. Re-apply them in case
+# the sandbox runtime rewrote /etc/passwd or /etc/group at boot. Only fix the
+# top-level directories: a recursive chown would walk every checkout.
+sudo install -d -o 1000 -g 1000 /home/user /home/user/.amp /home/user/.amp/bin \
+	/home/user/.local /home/user/.local/bin /home/user/.local/state /home/user/go /home/user/go/bin
 if getent group user >/dev/null 2>&1; then
 	sudo sed -i -E 's|^user:x:[0-9]+:|user:x:1000:|' /etc/group
 else
 	echo 'user:x:1000:' | sudo tee -a /etc/group >/dev/null
 fi
-[ -e /home/user/.amp/bin/amp ] || sudo ln -s /usr/local/bin/amp /home/user/.amp/bin/amp
-[ -e /home/user/.local/bin/amp ] || sudo ln -s /usr/local/bin/amp /home/user/.local/bin/amp
+getent passwd user >/dev/null 2>&1 ||
+	echo 'user:x:1000:1000::/home/user:/bin/bash' | sudo tee -a /etc/passwd >/dev/null
+# Dev servers and file watchers run out of inotify watches and file descriptors
+# at the default limits, and Chrome crashes when Docker's 64 MB /dev/shm fills.
+# Raise what the VM allows. agent-env.sh falls back for anything still small.
+sudo sysctl -q -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=1024 \
+	>/dev/null 2>&1 || true
+shm_kb=$(df -k --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ')
+case "$shm_kb" in '' | *[!0-9]*) shm_kb=0 ;; esac
+if [ "$shm_kb" -lt 2097152 ]; then
+	sudo mount -o remount,size=2g /dev/shm 2>/dev/null ||
+		sudo mount -t tmpfs -o size=2g,mode=1777,nosuid,nodev tmpfs /dev/shm 2>/dev/null || true
+fi
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || ulimit -n 1048576 2>/dev/null || true
 cat > /home/user/.amp-orb-bootstrap.sh <<'AMP_ORB_BOOTSTRAP'
 __BOOTSTRAP__
 AMP_ORB_BOOTSTRAP
@@ -399,68 +415,62 @@ def create_sandbox(
 	orb_id: str, snapshot_id: str | None, orb_type: str
 ) -> dict[str, Any]:
 	name = sandbox_name(orb_id)
-	base_template = BASE_TEMPLATES.get(orb_type, BASE_TEMPLATES[DEFAULT_ORB_TYPE])
-	expected = TYPE_SPECS.get(orb_type)
-	shape = (
-		f"{expected[0]} vCPU/{expected[1]} MiB"
-		if expected
-		else "template default"
-	)
-	template = base_template
+	cpus, memory_mib = TYPE_SPECS[orb_type]
+	shape = f"{cpus} vCPU/{memory_mib} MiB"
+	source: list[str] = []
 	if snapshot_id:
 		snapshot_template = snapshot_template_name(snapshot_id)
 		snapshot_info = template_usable(snapshot_template)
-		if snapshot_info:
-			actual = (snapshot_info.get("cpus"), snapshot_info.get("memory_mib"))
-			if expected and actual != expected:
-				log(
-					f"WARNING project snapshot {snapshot_template} is "
-					f"{actual[0]} vCPU/{actual[1]} MiB, expected {shape} for "
-					f"{orb_type}; booting {base_template} and running "
-					".agents/setup"
-				)
-			else:
-				template = snapshot_template
-				log(f"booting project snapshot {snapshot_template}")
-		else:
+		if not snapshot_info:
 			log(
 				f"WARNING project snapshot {snapshot_template} is missing or "
-				f"not usable; booting {base_template} and running .agents/setup"
+				"not usable; booting the base image and running .agents/setup"
 			)
-	base_info = template_usable(template)
-	if not base_info:
-		hint = ""
-		if expected:
-			hint = (
-				f" build it with CPUS={expected[0]} "
-				f"MEMORY={expected[1] // 1024}g ./base/build-template.sh "
-				f"{base_template}"
+		elif (snapshot_info.get("cpus"), snapshot_info.get("memory_mib")) != (
+			cpus,
+			memory_mib,
+		):
+			log(
+				f"WARNING project snapshot {snapshot_template} is "
+				f"{snapshot_info.get('cpus')} vCPU/"
+				f"{snapshot_info.get('memory_mib')} MiB, expected {shape} for "
+				f"{orb_type}; booting the base image and running .agents/setup"
 			)
-		raise DispatchError(
-			f"base template {template!r} is missing or incomplete;{hint}"
-		)
-	if expected:
-		actual = (base_info.get("cpus"), base_info.get("memory_mib"))
-		if actual != expected:
+		else:
+			# A template carries its own CPU and memory; sbx rejects --cpus
+			# and --memory with --template.
+			source = ["--template", snapshot_template]
+	if not source:
+		if not IMAGE:
 			raise DispatchError(
-				f"base template {template!r} is {actual[0]} vCPU/"
-				f"{actual[1]} MiB, expected {shape} for orb type {orb_type}"
+				"AMP_ORBS_IMAGE is not set; set it to the published orb image, "
+				"such as docker.io/<user>/amp-orb:latest"
 			)
-	log(f"creating cloud sandbox {name} from {template} ({orb_type}: {shape})")
+		source = [
+			"--image-ref",
+			IMAGE,
+			"--cpus",
+			str(cpus),
+			"--memory",
+			f"{memory_mib // 1024}g",
+			"--platform",
+			PLATFORM,
+		]
+	log(f"creating cloud sandbox {name} from {source[1]} ({orb_type}: {shape})")
 	proc = run(
 		[
 			"create",
 			"--name",
 			name,
-			"--template",
-			template,
+			*source,
 			"--ttl",
 			TTL,
 			"--on-timeout",
 			"stop",
 			"--no-progress",
 		],
-		timeout=180,
+		# The first create from a new image tag pulls the image.
+		timeout=240,
 		check=False,
 	)
 	if proc.returncode != 0:
@@ -755,22 +765,17 @@ def spawn(orb_id: str) -> None:
 		raise DispatchError("ORB_TOKEN is required for spawn")
 	requested_type = (os.environ.get("ORB_TYPE") or "").strip().lower()
 	orb_type = requested_type or DEFAULT_ORB_TYPE
-	if orb_type not in BASE_TEMPLATES:
+	if orb_type not in TYPE_SPECS:
 		log(f"unknown ORB_TYPE={requested_type!r}; using {DEFAULT_ORB_TYPE}")
 		orb_type = DEFAULT_ORB_TYPE
-	expected = TYPE_SPECS.get(orb_type)
-	shape = (
-		f"{expected[0]} vCPU/{expected[1]} MiB"
-		if expected
-		else "template default"
-	)
+	expected = TYPE_SPECS[orb_type]
+	shape = f"{expected[0]} vCPU/{expected[1]} MiB"
 	log(f"orb type {orb_type}: {shape}")
 	image = os.environ.get("ORB_IMAGE")
 	if image:
 		log(
 			f"ORB_IMAGE={image} ignored; Docker Cloud only accepts Docker Hub "
-			f"images, so orbs boot from template "
-			f"{BASE_TEMPLATES.get(orb_type, BASE_TEMPLATE)}"
+			f"images, so orbs boot from {IMAGE or 'AMP_ORBS_IMAGE'}"
 		)
 	info = resolve(orb_id)
 	if info is None:
@@ -781,7 +786,7 @@ def spawn(orb_id: str) -> None:
 		)
 	else:
 		actual = (info.get("cpus"), info.get("memory_mib"))
-		if expected and actual != expected:
+		if actual != expected:
 			log(
 				f"WARNING existing sandbox is {actual[0]} vCPU/"
 				f"{actual[1]} MiB, requested {orb_type} is {shape}; "
