@@ -425,8 +425,9 @@ The checkpoint path removes the image pull from the critical path. Creating from
 
 ### Checkpoint cost and safety
 
-- A checkpoint stores memory and disk. On the current image: about 16.6 GB for `micro`, 29.5 GB for `small`, and 44.5 GB for `medium`. Create only the types you use.
+- A checkpoint stores memory and disk. On the current image: about 16.6 GB for `micro`, 29.5 GB for `small`, and 44.5 GB for `medium`; the three together are about 90.6 GB. Create only the types you use.
 - Docker bills cloud compute per hour. Storage quota and cost for templates are not documented; watch your Docker account usage.
+- Templates belong to the Docker account that created them. A second profile with a different Docker account needs its own checkpoints.
 - Create checkpoints only from a credential-free sandbox. The helper boots the published image and saves before any bootstrap, so no Amp token or project secret is in the checkpoint. Never save a checkpoint from a sandbox that has seen a token, secret, or project files.
 - A restored checkpoint keeps the hostname of the sandbox that created it. Exec, networking, and tools work normally; the sandbox ID and name are still unique.
 - Checkpoints are tied to an image tag in their name. Remove old `amp-base-*` templates when you roll out a new tag.
