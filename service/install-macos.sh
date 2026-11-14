@@ -50,6 +50,8 @@ chmod 0755 "$LAUNCHER"
 	printf 'AMP_ORBS_IMAGE=%s\n' "$IMAGE"
 	printf 'AMP_ORBS_DEFAULT_TYPE=%s\n' "${AMP_ORBS_DEFAULT_TYPE:-medium}"
 	printf 'AMP_ORBS_TTL=%s\n' "${AMP_ORBS_TTL:-24h}"
+	printf 'AMP_ORBS_PAUSE_GRACE=%s\n' "${AMP_ORBS_PAUSE_GRACE:-10m}"
+	printf 'AMP_ORBS_BOOTSTRAP_SETTLE=%s\n' "${AMP_ORBS_BOOTSTRAP_SETTLE:-2}"
 	if [[ -n "$SBX_BIN" ]]; then
 		printf 'AMP_ORBS_SBX=%s\n' "$SBX_BIN"
 	fi

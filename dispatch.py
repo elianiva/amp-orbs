@@ -16,9 +16,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -54,11 +57,51 @@ TTL = os.environ.get("AMP_ORBS_TTL", "24h")
 # Docker Cloud never lets an expiry pass 24 hours after creation.
 TTL_CEILING = 24 * 3600
 TTL_MARGIN = 120
+
+
+def parse_duration(value: str, default: float = 0.0) -> float:
+	"""Parse a Go-style duration such as 10m, 1h30m, or 45s."""
+	text = (value or "").strip().lower()
+	if not text or text in {"0", "off", "none", "no", "false"}:
+		return 0.0
+	if text.isdigit():
+		return float(text)
+	units = {"h": 3600.0, "m": 60.0, "s": 1.0}
+	total = 0.0
+	number = ""
+	parsed = False
+	for char in text:
+		if char.isdigit() or char == ".":
+			number += char
+			continue
+		unit = units.get(char)
+		if unit is None or not number:
+			return default
+		total += float(number) * unit
+		number = ""
+		parsed = True
+	if number or not parsed:
+		return default
+	return total
+
+
 JOB_BUDGET = float(os.environ.get("AMP_ORBS_JOB_BUDGET", "280"))
 SNAPSHOT_BUDGET = float(os.environ.get("AMP_ORBS_SNAPSHOT_BUDGET", "120"))
-PAUSE_WAIT = float(os.environ.get("AMP_ORBS_PAUSE_WAIT", "150"))
+# Keep a paused sandbox running for this long before hibernating it. A return
+# inside the window skips the ~6s VM resume and the ~3 minute stop entirely.
+PAUSE_GRACE = parse_duration(
+	os.environ.get("AMP_ORBS_PAUSE_GRACE", "10m"), 600
+)
+# Wait this long before checking that the Amp bootstrap process survived.
+BOOTSTRAP_SETTLE = float(os.environ.get("AMP_ORBS_BOOTSTRAP_SETTLE", "2"))
 SETTLE_BUDGET = float(os.environ.get("AMP_ORBS_SETTLE_BUDGET", "220"))
 LOCK_WAIT = float(os.environ.get("AMP_ORBS_LOCK_WAIT", "30"))
+TIMER_RETRY = 5.0
+# Empty means amp-base-<image tag>; set to off to disable base templates.
+BASE_TEMPLATE_PREFIX = os.environ.get(
+	"AMP_ORBS_BASE_TEMPLATE_PREFIX", ""
+).strip()
+BASE_TEMPLATE_FALLBACK_LOGGED: set[str] = set()
 
 JOB = ""
 JOB_START = 0.0
@@ -76,14 +119,19 @@ printf 'pid1=%s shm=%s nofile=%s inotify_watches=%s mem=%s earlyoom=%s\n' \
 	"$(pgrep -x earlyoom >/dev/null 2>&1 && echo on || echo off)" >> "$HOME/.amp-bootstrap.log"
 # A token belongs to one spawn job and expires after 15 minutes, so an older
 # bootstrap must not be reused after a pause.
+rm -f "$HOME/.amp-orb-bootstrap.pid"
 pkill -x amp 2>/dev/null || true
 for _ in $(seq 1 20); do
 	pgrep -x amp >/dev/null 2>&1 || break
 	sleep 0.2
 done
 pkill -9 -x amp 2>/dev/null || true
-setsid amp orb bootstrap </dev/null >>"$HOME/.amp-bootstrap.log" 2>&1 &
-echo "bootstrap started pid $!"
+# The waiter keeps this PID alive exactly as long as Amp runs, so the launcher
+# can tell the new bootstrap from an older one that is still shutting down.
+setsid --wait amp orb bootstrap </dev/null >>"$HOME/.amp-bootstrap.log" 2>&1 &
+amp_pid=$!
+printf '%s\n' "$amp_pid" >"$HOME/.amp-orb-bootstrap.pid"
+echo "bootstrap started pid $amp_pid"
 """
 
 LAUNCHER = r"""
@@ -109,6 +157,8 @@ if command -v earlyoom >/dev/null 2>&1 && ! pgrep -x earlyoom >/dev/null 2>&1; t
 		--avoid '^(amp|earlyoom|sshd|dockerd|containerd)$' \
 		</dev/null >>/home/user/.amp-earlyoom.log 2>&1 &
 fi
+marker=/home/user/.amp-orb-bootstrap.pid
+rm -f "$marker"
 cat > /home/user/.amp-orb-bootstrap.sh <<'AMP_ORB_BOOTSTRAP'
 __BOOTSTRAP__
 AMP_ORB_BOOTSTRAP
@@ -117,18 +167,24 @@ env HOME=/home/user USER=user \
 	PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
 	setsid bash /home/user/.amp-orb-bootstrap.sh \
 	</dev/null >>/home/user/.amp-bootstrap.log 2>&1 &
-echo launched
-"""
-
-BOOTSTRAP_CHECK = r"""
-env HOME=/home/user bash -c '
-if pgrep -x amp >/dev/null 2>&1; then
-	echo RUNNING
-else
-	echo DEAD
-	tail -40 /home/user/.amp-bootstrap.log 2>/dev/null || true
-	exit 1
-fi'
+# Wait for the new Amp process instead of any process named amp: an older
+# bootstrap can still be shutting down, and reusing its token would fail.
+sleep __SETTLE__
+for _ in $(seq 1 20); do
+	pid="$(cat "$marker" 2>/dev/null || true)"
+	state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+	case "$state" in
+	'' | Z*) ;;
+	*)
+		echo launched
+		exit 0
+		;;
+	esac
+	sleep 0.5
+done
+echo 'amp did not stay running' >&2
+tail -40 /home/user/.amp-bootstrap.log 2>/dev/null >&2 || true
+exit 1
 """
 
 
@@ -258,11 +314,11 @@ def remove_state(orb_id: str) -> None:
 
 
 @contextmanager
-def orb_lock(orb_id: str):
+def orb_lock(orb_id: str, wait: float | None = None):
 	path = STATE_DIR / "locks" / f"{orb_key(orb_id)}.lock"
 	path.parent.mkdir(parents=True, exist_ok=True)
 	with path.open("w") as handle:
-		deadline = time.monotonic() + LOCK_WAIT
+		deadline = time.monotonic() + (LOCK_WAIT if wait is None else wait)
 		while True:
 			try:
 				fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -277,6 +333,196 @@ def orb_lock(orb_id: str):
 			yield
 		finally:
 			fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def timer_path(orb_id: str) -> Path:
+	return STATE_DIR / "timers" / f"{orb_key(orb_id)}.json"
+
+
+def read_timer(orb_id: str) -> dict[str, Any] | None:
+	path = timer_path(orb_id)
+	try:
+		with path.open() as handle:
+			value = json.load(handle)
+	except FileNotFoundError:
+		return None
+	except (OSError, json.JSONDecodeError) as error:
+		log(f"ignoring unreadable timer file {path}: {error}")
+		return None
+	return value if isinstance(value, dict) else None
+
+
+def write_timer(orb_id: str, value: dict[str, Any]) -> None:
+	path = timer_path(orb_id)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	temporary = path.with_suffix(".tmp")
+	with temporary.open("w") as handle:
+		json.dump(value, handle, indent=2)
+		handle.write("\n")
+	os.replace(temporary, path)
+
+
+def remove_timer(orb_id: str) -> None:
+	try:
+		timer_path(orb_id).unlink()
+	except FileNotFoundError:
+		pass
+
+
+def pid_alive(pid: int) -> bool:
+	if pid <= 0:
+		return False
+	try:
+		os.kill(pid, 0)
+	except ProcessLookupError:
+		return False
+	except PermissionError:
+		return True
+	return True
+
+
+def cancel_stop_timer(orb_id: str) -> None:
+	value = read_timer(orb_id)
+	if not value:
+		return
+	pid = value.get("pid")
+	if isinstance(pid, int) and pid_alive(pid):
+		try:
+			os.kill(pid, signal.SIGTERM)
+		except OSError:
+			pass
+	remove_timer(orb_id)
+	log("canceled the scheduled stop")
+
+
+def spawn_stop_timer(
+	orb_id: str, sandbox_id: str, delay: float, *, replace: bool = True
+) -> None:
+	if replace:
+		cancel_stop_timer(orb_id)
+	deadline = time.time() + max(0.0, delay)
+	token = secrets.token_hex(16)
+	value = {
+		"orb_id": orb_id,
+		"sandbox_id": sandbox_id,
+		"deadline": deadline,
+		"token": token,
+		"pid": 0,
+	}
+	write_timer(orb_id, value)
+	logfile = LOG_DIR / f"{orb_key(orb_id)}.timer.log"
+	logfile.parent.mkdir(parents=True, exist_ok=True)
+	command = [
+		sys.executable,
+		str(Path(__file__).resolve()),
+		"--stop-timer",
+		orb_id,
+		sandbox_id,
+		str(deadline),
+		token,
+	]
+	try:
+		with logfile.open("ab") as handle:
+			process = subprocess.Popen(
+				command,
+				stdin=subprocess.DEVNULL,
+				stdout=handle,
+				stderr=handle,
+				start_new_session=True,
+				close_fds=True,
+			)
+	except OSError as error:
+		remove_timer(orb_id)
+		raise DispatchError(f"could not start the stop timer: {error}") from error
+	value["pid"] = process.pid
+	write_timer(orb_id, value)
+	log(
+		f"keeping the sandbox warm until {clock(deadline)} "
+		f"({max(0.0, delay):.0f}s); scheduled stop pid {process.pid}"
+	)
+
+
+def stop_timer(orb_id: str, sandbox_id: str, deadline: float, token: str) -> None:
+	"""Wait out the warm grace, then stop the sandbox under the orb lock."""
+	while True:
+		remaining = deadline - time.time()
+		if remaining > 0:
+			time.sleep(min(remaining, 30))
+		value = read_timer(orb_id)
+		if not value or value.get("token") != token:
+			log("scheduled stop was canceled")
+			return
+		try:
+			with orb_lock(orb_id):
+				value = read_timer(orb_id)
+				if not value or value.get("token") != token:
+					log("scheduled stop was canceled")
+					return
+				info = inspect_sandbox(sandbox_id)
+				state = str((info or {}).get("state") or "unknown")
+				if info is None:
+					log("sandbox is gone; dropping the scheduled stop")
+				elif state == "running":
+					log(f"stopping {sandbox_id} after the warm grace period")
+					proc = run(["stop", sandbox_id], timeout=60, check=False)
+					if proc.returncode != 0:
+						log(
+							"WARNING scheduled stop failed: "
+							f"{tail(proc.stderr or proc.stdout)}"
+						)
+				else:
+					log(f"sandbox is {state}; no scheduled stop needed")
+				remove_timer(orb_id)
+				return
+		except DispatchError as error:
+			log(f"scheduled stop is waiting for the orb lock: {error}")
+			time.sleep(TIMER_RETRY)
+
+
+def reap_stop_timers() -> None:
+	"""Re-arm timers whose process died, for example during a service restart."""
+	directory = STATE_DIR / "timers"
+	if not directory.is_dir():
+		return
+	for path in directory.glob("*.json"):
+		try:
+			value = json.loads(path.read_text())
+		except (OSError, json.JSONDecodeError):
+			continue
+		if not isinstance(value, dict):
+			continue
+		pid = value.get("pid")
+		if isinstance(pid, int) and pid_alive(pid):
+			continue
+		orb_id = value.get("orb_id")
+		sandbox_id = value.get("sandbox_id")
+		deadline = value.get("deadline")
+		if not orb_id or not sandbox_id or not isinstance(deadline, (int, float)):
+			try:
+				path.unlink()
+			except FileNotFoundError:
+				pass
+			continue
+		delay = max(0.0, float(deadline) - time.time())
+		try:
+			# Do not race a spawn, pause, or delete job for the same orb.
+			# Holding the lock here means that job either re-armed earlier
+			# or cancels this timer after it starts.
+			with orb_lock(str(orb_id), wait=1.0):
+				current = read_timer(str(orb_id))
+				if not current or current.get("token") != value.get("token"):
+					continue
+				spawn_stop_timer(
+					str(orb_id), str(sandbox_id), delay, replace=False
+				)
+			log(f"re-armed the scheduled stop for {orb_id}")
+		except DispatchError:
+			continue
+		except OSError as error:
+			log(
+				f"WARNING could not re-arm the scheduled stop for {orb_id}: "
+				f"{error}"
+			)
 
 
 def is_missing(text: str) -> bool:
@@ -400,6 +646,30 @@ def snapshot_template_name(snapshot_id: str) -> str:
 	return f"amp-snap-{digest}"
 
 
+def image_tag(image: str) -> str:
+	reference = (image or "").split("@", 1)[0]
+	last = reference.rsplit("/", 1)[-1]
+	return last.rsplit(":", 1)[1] if ":" in last else "latest"
+
+
+def sanitize_template_part(value: str) -> str:
+	return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-.")
+
+
+def base_template_prefix() -> str:
+	if BASE_TEMPLATE_PREFIX.lower() in {"0", "off", "none", "no", "false"}:
+		return ""
+	prefix = BASE_TEMPLATE_PREFIX or f"amp-base-{image_tag(IMAGE)}"
+	return sanitize_template_part(prefix)
+
+
+def base_template_name(orb_type: str) -> str:
+	prefix = base_template_prefix()
+	if not prefix:
+		return ""
+	return f"{prefix}-{TEMPLATE_ARCH}-{orb_type}"
+
+
 def create_sandbox(
 	orb_id: str, snapshot_id: str | None, orb_type: str
 ) -> dict[str, Any]:
@@ -429,13 +699,40 @@ def create_sandbox(
 			# A template carries its own CPU and memory; sbx rejects --cpus
 			# and --memory with --template.
 			source = ["--template", snapshot_template]
+	base_template = ""
 	if not source:
+		base_template = base_template_name(orb_type)
+		if base_template:
+			base_info = template_usable(base_template)
+			if not base_info:
+				if base_template not in BASE_TEMPLATE_FALLBACK_LOGGED:
+					BASE_TEMPLATE_FALLBACK_LOGGED.add(base_template)
+					log(
+						f"base template {base_template} is missing; "
+						f"booting {IMAGE or 'AMP_ORBS_IMAGE'} instead"
+					)
+			elif (base_info.get("cpus"), base_info.get("memory_mib")) != (
+				cpus,
+				memory_mib,
+			):
+				log(
+					f"WARNING base template {base_template} is "
+					f"{base_info.get('cpus')} vCPU/"
+					f"{base_info.get('memory_mib')} MiB, expected {shape}; "
+					"booting the image instead"
+				)
+			else:
+				# A memory checkpoint restores in about two seconds, while
+				# materializing the image can take a minute on a cold node.
+				source = ["--template", base_template]
+
+	def image_source() -> list[str]:
 		if not IMAGE:
 			raise DispatchError(
 				"AMP_ORBS_IMAGE is not set; set it to the published orb image, "
 				"such as docker.io/<user>/amp-orb:latest"
 			)
-		source = [
+		return [
 			"--image-ref",
 			IMAGE,
 			"--cpus",
@@ -445,23 +742,24 @@ def create_sandbox(
 			"--platform",
 			PLATFORM,
 		]
-	log(f"creating cloud sandbox {name} from {source[1]} ({orb_type}: {shape})")
-	proc = run(
-		[
+
+	def create_command(source_args: list[str]) -> list[str]:
+		return [
 			"create",
 			"--name",
 			name,
-			*source,
+			*source_args,
 			"--ttl",
 			TTL,
 			"--on-timeout",
 			"stop",
 			"--no-progress",
-		],
-		# The first create from a new image tag pulls the image.
-		timeout=240,
-		check=False,
-	)
+		]
+
+	if not source:
+		source = image_source()
+	log(f"creating cloud sandbox {name} from {source[1]} ({orb_type}: {shape})")
+	proc = run(create_command(source), timeout=240, check=False)
 	if proc.returncode != 0:
 		existing = find_by_name(name)
 		if existing:
@@ -472,10 +770,33 @@ def create_sandbox(
 			)
 			write_state(orb_id, str(full["id"]), name)
 			return full
-		raise SbxError(
-			f"sbx create exited {proc.returncode}: "
-			f"{tail(proc.stderr or proc.stdout)}"
+		if not base_template:
+			raise SbxError(
+				f"sbx create exited {proc.returncode}: "
+				f"{tail(proc.stderr or proc.stdout)}"
+			)
+		log(
+			f"WARNING create from base template {base_template} failed; "
+			f"retrying from {IMAGE}: {tail(proc.stderr or proc.stdout)}"
 		)
+		# Remove a partially created sandbox before reusing the name.
+		run(["rm", "--force", name], timeout=90, check=False)
+		source = image_source()
+		proc = run(create_command(source), timeout=240, check=False)
+		if proc.returncode != 0:
+			existing = find_by_name(name)
+			if existing:
+				full = inspect_sandbox(str(existing["id"])) or existing
+				log(
+					f"create reported an error but {full['id']} already "
+					f"exists; using it"
+				)
+				write_state(orb_id, str(full["id"]), name)
+				return full
+			raise SbxError(
+				f"sbx create exited {proc.returncode}: "
+				f"{tail(proc.stderr or proc.stdout)}"
+			)
 	match = re.search(r"\bsbx_[A-Za-z0-9]+\b", proc.stdout + "\n" + proc.stderr)
 	info = inspect_sandbox(match.group(0)) if match else None
 	if not info:
@@ -515,22 +836,23 @@ def wait_for_state(
 	)
 
 
-def ensure_running(sandbox_id: str) -> bool:
-	"""Return True when this call resumed a stopped sandbox."""
-	info = inspect_sandbox(sandbox_id)
+def ensure_running(
+	sandbox_id: str, info: dict[str, Any] | None = None
+) -> tuple[bool, dict[str, Any]]:
+	"""Return whether this call resumed the sandbox, and its latest info."""
+	info = info or inspect_sandbox(sandbox_id)
 	if info is None:
 		raise DispatchError(f"sandbox {sandbox_id} no longer exists")
 	state = str(info.get("state") or "unknown")
 	if state == "running":
-		return False
+		return False, info
 	if state in {"stopping", "hibernating"}:
 		log(f"{sandbox_id} is {state}; waiting for it to settle")
 		info = wait_for_state(sandbox_id, {"stopped"}, SETTLE_BUDGET)
 		state = str(info.get("state") or "stopped")
 	if state == "starting":
 		log(f"{sandbox_id} is starting; waiting for it")
-		wait_for_state(sandbox_id, {"running"}, 120)
-		return True
+		return True, wait_for_state(sandbox_id, {"running"}, 120)
 	if state == "stopped":
 		log(f"{sandbox_id} is stopped; resuming")
 		proc = run(["exec", sandbox_id, "true"], timeout=120, check=False)
@@ -539,8 +861,7 @@ def ensure_running(sandbox_id: str) -> bool:
 				f"could not resume {sandbox_id}: "
 				f"{tail(proc.stderr or proc.stdout)}"
 			)
-		wait_for_state(sandbox_id, {"running"}, 120)
-		return True
+		return True, wait_for_state(sandbox_id, {"running"}, 120)
 	if state in {"error", "failed"}:
 		raise DispatchError(f"sandbox {sandbox_id} is in state {state}")
 	log(f"{sandbox_id} is {state}; trying to start it")
@@ -550,8 +871,7 @@ def ensure_running(sandbox_id: str) -> bool:
 			f"could not start {sandbox_id}: "
 			f"{tail(proc.stderr or proc.stdout)}"
 		)
-	wait_for_state(sandbox_id, {"running"}, 120)
-	return True
+	return True, wait_for_state(sandbox_id, {"running"}, 120)
 
 
 def parse_time(value: Any) -> float | None:
@@ -571,7 +891,7 @@ def clock(epoch: float) -> str:
 	return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def refresh_ttl(sandbox_id: str) -> None:
+def refresh_ttl(sandbox_id: str, info: dict[str, Any] | None = None) -> None:
 	"""Push a running sandbox's expiry to Docker Cloud's 24-hour ceiling.
 
 	`create --ttl` sets only the first period. A stopped sandbox that resumes
@@ -579,7 +899,7 @@ def refresh_ttl(sandbox_id: str) -> None:
 	long after every wake, however busy it is. `sbx ttl` cannot extend past 24
 	hours after creation, so an older sandbox keeps the resume timeout.
 	"""
-	info = inspect_sandbox(sandbox_id) or {}
+	info = info or inspect_sandbox(sandbox_id) or {}
 	created = parse_time(info.get("created_at"))
 	expires = parse_time(info.get("expires_at"))
 	if created is None or expires is None:
@@ -593,7 +913,8 @@ def refresh_ttl(sandbox_id: str) -> None:
 	if gap >= 60:
 		proc = run(["ttl", f"+{gap}s", sandbox_id], timeout=60, check=False)
 		if proc.returncode == 0:
-			expires = parse_time((inspect_sandbox(sandbox_id) or {}).get("expires_at")) or expires
+			# Avoid a second inspect just to read back what we asked for.
+			expires = ceiling - TTL_MARGIN
 		else:
 			log(f"WARNING could not extend the TTL: {tail(proc.stderr or proc.stdout)}")
 	now = time.time()
@@ -609,6 +930,13 @@ def refresh_ttl(sandbox_id: str) -> None:
 		)
 
 
+def refresh_ttl_safe(sandbox_id: str, info: dict[str, Any]) -> None:
+	try:
+		refresh_ttl(sandbox_id, info)
+	except DispatchError as error:
+		log(f"WARNING TTL refresh failed: {error}")
+
+
 def start_bootstrap(
 	sandbox_id: str, token: str, amp_url: str | None
 ) -> None:
@@ -616,7 +944,9 @@ def start_bootstrap(
 	if amp_url:
 		env_args += ["-e", f"AMP_URL={amp_url}"]
 	log("restarting bootstrap with this spawn job's token")
-	launcher = LAUNCHER.replace("__BOOTSTRAP__", BOOTSTRAP.strip())
+	launcher = LAUNCHER.replace(
+		"__BOOTSTRAP__", BOOTSTRAP.strip()
+	).replace("__SETTLE__", f"{max(0.0, BOOTSTRAP_SETTLE):g}")
 	proc = run(
 		[
 			"exec",
@@ -633,19 +963,6 @@ def start_bootstrap(
 		raise SbxError(
 			f"bootstrap launch failed: {tail(proc.stderr or proc.stdout)}"
 		)
-	# A rejected or immediately crashing bootstrap exits in under a second.
-	# Do not report success until the process has survived the first seconds.
-	time.sleep(4)
-	check = run(
-		["exec", sandbox_id, "bash", "-lc", BOOTSTRAP_CHECK],
-		timeout=60,
-		check=False,
-	)
-	if check.returncode != 0:
-		raise DispatchError(
-			"bootstrap did not survive: "
-			f"{tail(check.stdout + check.stderr)}"
-		)
 	log("bootstrap is running")
 
 
@@ -661,7 +978,7 @@ def save_snapshot(
 		log(f"could not inspect snapshot template {name}: {error}")
 	timeout = min(
 		SNAPSHOT_BUDGET,
-		max(30.0, remaining - PAUSE_WAIT - 20.0),
+		max(30.0, remaining - 20.0),
 	)
 	log(
 		f"saving project snapshot {snapshot_id} as {name} "
@@ -705,6 +1022,7 @@ def pause(orb_id: str) -> None:
 	sandbox_id = str(info["id"])
 	state = str(info.get("state") or "unknown")
 	snapshot_id = os.environ.get("ORB_SNAPSHOT_ID") or None
+	cancel_stop_timer(orb_id)
 	if state == "starting":
 		log(f"{sandbox_id} is starting; waiting for it")
 		info = wait_for_state(sandbox_id, {"running"}, 120)
@@ -725,12 +1043,15 @@ def pause(orb_id: str) -> None:
 		log("sandbox is already stopped; disk preserved")
 		return
 	if state in {"stopping", "hibernating"}:
-		try:
-			wait_for_state(sandbox_id, {"stopped"}, PAUSE_WAIT)
-			log("sandbox finished stopping; disk preserved")
-		except DispatchError as error:
-			log(f"stop is still settling; leaving it: {error}")
+		log(f"sandbox is already {state}; leaving it")
 		return
+	if PAUSE_GRACE > 0:
+		try:
+			spawn_stop_timer(orb_id, sandbox_id, PAUSE_GRACE)
+		except DispatchError as error:
+			log(f"WARNING could not schedule the warm grace: {error}")
+		else:
+			return
 	log(f"stopping {sandbox_id}")
 	proc = run(["stop", sandbox_id], timeout=60, check=False)
 	if proc.returncode != 0:
@@ -745,14 +1066,14 @@ def pause(orb_id: str) -> None:
 			f"stop exited {proc.returncode}: "
 			f"{tail(proc.stderr or proc.stdout)}"
 		)
-	try:
-		wait_for_state(sandbox_id, {"stopped"}, PAUSE_WAIT)
-		log("sandbox stopped; disk and memory preserved")
-	except DispatchError as error:
-		log(f"stop accepted; sandbox is still settling: {error}")
+	# stop returns once the request is accepted. Waiting for "stopped" only
+	# holds the orb lock for the ~3 minute hibernation, so leave it to the
+	# next spawn, which already waits for the sandbox to settle.
+	log("stop accepted; the sandbox will settle asynchronously")
 
 
 def delete(orb_id: str) -> None:
+	cancel_stop_timer(orb_id)
 	info = resolve(orb_id)
 	if info is None:
 		remove_state(orb_id)
@@ -804,6 +1125,7 @@ def delete(orb_id: str) -> None:
 
 
 def spawn(orb_id: str) -> None:
+	cancel_stop_timer(orb_id)
 	token = os.environ.get("ORB_TOKEN")
 	if not token:
 		raise DispatchError("ORB_TOKEN is required for spawn")
@@ -840,20 +1162,30 @@ def spawn(orb_id: str) -> None:
 			f"found {info['id']} ({info.get('state')})"
 		)
 	sandbox_id = str(info["id"])
-	ensure_running(sandbox_id)
-	try:
-		refresh_ttl(sandbox_id)
-	except DispatchError as error:
-		log(f"WARNING TTL refresh failed: {error}")
+	_, info = ensure_running(sandbox_id, info)
+	ttl_thread = threading.Thread(
+		target=refresh_ttl_safe,
+		args=(sandbox_id, info),
+		daemon=True,
+	)
+	ttl_thread.start()
 	start_bootstrap(
 		sandbox_id,
 		token,
 		os.environ.get("AMP_URL") or None,
 	)
+	ttl_thread.join(timeout=15)
+	if ttl_thread.is_alive():
+		log("WARNING TTL refresh is still running; leaving it")
 
 
 def main() -> None:
 	global JOB, JOB_START
+	if len(sys.argv) == 6 and sys.argv[1] == "--stop-timer":
+		orb_id = sys.argv[2]
+		JOB = f"stop-timer {orb_id}"
+		stop_timer(orb_id, sys.argv[3], float(sys.argv[4]), sys.argv[5])
+		return
 	operation = os.environ.get("ORB_OPERATION")
 	orb_id = os.environ.get("ORB_ID")
 	if not operation or not orb_id:
@@ -863,6 +1195,7 @@ def main() -> None:
 	STATE_DIR.mkdir(parents=True, exist_ok=True)
 	LOG_DIR.mkdir(parents=True, exist_ok=True)
 	log("starting")
+	reap_stop_timers()
 	with orb_lock(orb_id):
 		if operation == "spawn":
 			spawn(orb_id)

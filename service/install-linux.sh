@@ -119,6 +119,8 @@ AMP_ORBS_IMAGE=$AMP_ORBS_IMAGE
 AMP_ORBS_PLATFORM=$AMP_ORBS_PLATFORM
 AMP_ORBS_DEFAULT_TYPE=$AMP_ORBS_DEFAULT_TYPE
 AMP_ORBS_TTL=$AMP_ORBS_TTL
+AMP_ORBS_PAUSE_GRACE=${AMP_ORBS_PAUSE_GRACE:-10m}
+AMP_ORBS_BOOTSTRAP_SETTLE=${AMP_ORBS_BOOTSTRAP_SETTLE:-2}
 AMP_ORBS_SBX=$SBX_BIN
 DOCKER_CONFIG=$DOCKER_CONFIG
 XDG_CONFIG_HOME=$XDG_CONFIG_HOME
@@ -136,6 +138,8 @@ AMP_ORBS_IMAGE=$AMP_ORBS_IMAGE
 AMP_ORBS_PLATFORM=$AMP_ORBS_PLATFORM
 AMP_ORBS_DEFAULT_TYPE=$AMP_ORBS_DEFAULT_TYPE
 AMP_ORBS_TTL=$AMP_ORBS_TTL
+AMP_ORBS_PAUSE_GRACE=${AMP_ORBS_PAUSE_GRACE:-10m}
+AMP_ORBS_BOOTSTRAP_SETTLE=${AMP_ORBS_BOOTSTRAP_SETTLE:-2}
 AMP_ORBS_SBX=$SBX_BIN
 DOCKER_CONFIG=$DOCKER_CONFIG
 XDG_CONFIG_HOME=$XDG_CONFIG_HOME
@@ -205,6 +209,13 @@ New orbs boot from $AMP_ORBS_IMAGE. The provider passes a sanitized environment
 to the job script, so the launcher loads the non-secret job env before running
 dispatch.py. To roll out a new image, push it, update AMP_ORBS_IMAGE in both
 $ENV_FILE and $JOB_ENV_FILE, then restart the service.
+
+New orbs use amp-base-<tag>-<arch>-<type> memory checkpoints when they exist.
+Create them after publishing an image with:
+  AMP_ORBS_IMAGE=$AMP_ORBS_IMAGE ./service/create-base-templates.sh
+
+Paused orbs stay warm for AMP_ORBS_PAUSE_GRACE (10m) before Docker stops them.
+Set it to 0 in the job env to stop immediately.
 
 Follow logs with:
   journalctl -u $LABEL -f
