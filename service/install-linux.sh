@@ -17,6 +17,8 @@ UNIT_SOURCE="$ROOT/service/amp-orb-provider@.service"
 UNIT_TARGET="/etc/systemd/system/amp-orb-provider@.service"
 ENV_DIR="/etc/amp-orbs"
 ENV_FILE="$ENV_DIR/${PROFILE}.env"
+JOB_ENV_FILE="$ENV_DIR/${PROFILE}.job.env"
+LAUNCHER="/usr/local/bin/amp-orb-dispatch-${PROFILE}"
 DRY_RUN="${DRY_RUN:-0}"
 
 if [[ ! "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,62}$ ]]; then
@@ -99,7 +101,13 @@ sed \
 	-e "s|__GROUP__|$SERVICE_GROUP|g" \
 	-e "s|__ROOT__|$ROOT|g" \
 	-e "s|__AMP_BIN__|$AMP_BIN|g" \
+	-e "s|__LAUNCHER__|$LAUNCHER|g" \
 	"$UNIT_SOURCE" >"$WORK/unit"
+
+sed \
+	-e "s|__JOB_ENV__|$JOB_ENV_FILE|g" \
+	-e "s|__DISPATCH__|$ROOT/dispatch.py|g" \
+	"$ROOT/service/amp-orb-dispatch.py" >"$WORK/launcher"
 
 cat >"$WORK/env" <<EOF
 HOME=$SERVICE_HOME
@@ -116,11 +124,32 @@ DOCKER_CONFIG=$DOCKER_CONFIG
 XDG_CONFIG_HOME=$XDG_CONFIG_HOME
 EOF
 
+# amp orb provider runs the job script with a sanitized environment, so the
+# AMP_ORBS_* values above never reach dispatch.py. The launcher reads this
+# non-secret copy instead. Keep the token out of it.
+cat >"$WORK/job-env" <<EOF
+HOME=$SERVICE_HOME
+PATH=$SERVICE_HOME/.amp/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+AMP_ORBS_ROOT=$ROOT
+AMP_ORBS_STATE=$AMP_ORBS_STATE
+AMP_ORBS_IMAGE=$AMP_ORBS_IMAGE
+AMP_ORBS_PLATFORM=$AMP_ORBS_PLATFORM
+AMP_ORBS_DEFAULT_TYPE=$AMP_ORBS_DEFAULT_TYPE
+AMP_ORBS_TTL=$AMP_ORBS_TTL
+AMP_ORBS_SBX=$SBX_BIN
+DOCKER_CONFIG=$DOCKER_CONFIG
+XDG_CONFIG_HOME=$XDG_CONFIG_HOME
+EOF
+
 if [[ "$DRY_RUN" = 1 ]]; then
 	echo "=== $UNIT_TARGET ==="
 	cat "$WORK/unit"
 	echo "=== $ENV_FILE (token redacted) ==="
 	sed 's/^AMP_ORB_PROVIDER_TOKEN=.*/AMP_ORB_PROVIDER_TOKEN=<redacted>/' "$WORK/env"
+	echo "=== $JOB_ENV_FILE (non-secret) ==="
+	cat "$WORK/job-env"
+	echo "=== $LAUNCHER ==="
+	cat "$WORK/launcher"
 	exit 0
 fi
 
@@ -147,9 +176,15 @@ $SUDO chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/logs" "$ROOT/state"
 $SUDO install -d -m 0755 "$ROOT/logs/$PROFILE" "$AMP_ORBS_STATE"
 $SUDO install -d -m 0700 "$DOCKER_CONFIG" "$XDG_CONFIG_HOME"
 $SUDO chown -R "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/logs/$PROFILE" "$AMP_ORBS_STATE" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME"
-$SUDO install -d -m 0750 "$ENV_DIR"
+$SUDO install -d -m 0755 "$ENV_DIR"
 $SUDO install -m 0600 -o root -g root "$WORK/env" "$ENV_FILE"
+$SUDO install -m 0644 -o root -g root "$WORK/job-env" "$JOB_ENV_FILE"
 $SUDO install -m 0644 "$WORK/unit" "$UNIT_TARGET"
+$SUDO install -d -m 0755 "$(dirname "$LAUNCHER")"
+$SUDO install -m 0755 "$WORK/launcher" "$LAUNCHER"
+if command -v restorecon >/dev/null 2>&1; then
+	$SUDO restorecon "$ENV_FILE" "$JOB_ENV_FILE" "$UNIT_TARGET" "$LAUNCHER" 2>/dev/null || true
+fi
 
 echo "==> starting $LABEL"
 $SUDO systemctl daemon-reload
@@ -159,13 +194,17 @@ $SUDO systemctl --no-pager status "$LABEL" | sed -n '1,20p'
 cat <<EOF
 
 Profile $PROFILE is installed.
-  service: $LABEL
-  env:     $ENV_FILE
-  state:   $AMP_ORBS_STATE
-  logs:    journalctl -u $LABEL
+  service:  $LABEL
+  env:      $ENV_FILE (token, mode 600)
+  job env:  $JOB_ENV_FILE (non-secret orb settings)
+  launcher: $LAUNCHER
+  state:    $AMP_ORBS_STATE
+  logs:     journalctl -u $LABEL
 
-New orbs boot from $AMP_ORBS_IMAGE. To roll out a new image, push it and
-update AMP_ORBS_IMAGE in $ENV_FILE, then restart the service.
+New orbs boot from $AMP_ORBS_IMAGE. The provider passes a sanitized environment
+to the job script, so the launcher loads the non-secret job env before running
+dispatch.py. To roll out a new image, push it, update AMP_ORBS_IMAGE in both
+$ENV_FILE and $JOB_ENV_FILE, then restart the service.
 
 Follow logs with:
   journalctl -u $LABEL -f

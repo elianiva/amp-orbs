@@ -25,10 +25,10 @@ Options:
   --yes, -y               Do not ask for confirmation
   -h, --help              Show this help
 
-The script stops and disables the service, then removes the env file, state,
-logs, and the profile's sbx config. It does not delete Amp provider records,
-cloud templates, or cloud sandboxes. Remove test sandboxes with
-`sbx --cloud rm --force` and manage providers in Settings > Orbs.
+The script stops and disables the service, then removes the env file, job env,
+launcher, state, logs, and the profile's sbx config. It does not delete Amp
+provider records, cloud templates, or cloud sandboxes. Remove test sandboxes
+with `sbx --cloud rm --force` and manage providers in Settings > Orbs.
 EOF
 }
 
@@ -88,7 +88,7 @@ profiles=()
 if [[ "$ALL" -eq 1 ]]; then
 	while IFS= read -r env_file; do
 		profiles+=("$(basename "$env_file" .env)")
-	done < <(find "$ENV_DIR" -maxdepth 1 -name '*.env' -type f 2>/dev/null | sort)
+	done < <(find "$ENV_DIR" -maxdepth 1 -name '*.env' ! -name '*.job.env' -type f 2>/dev/null | sort)
 	if [[ ${#profiles[@]} -eq 0 && -f "$UNIT" ]]; then
 		profiles=("")
 	fi
@@ -106,6 +106,8 @@ for profile in "${profiles[@]}"; do
 	if [[ -n "$profile" ]]; then
 		echo "  service amp-orb-provider@$profile.service"
 		echo "  $ENV_DIR/$profile.env"
+		echo "  $ENV_DIR/$profile.job.env"
+		echo "  /usr/local/bin/amp-orb-dispatch-$profile"
 		echo "  $ROOT/state/$profile and $ROOT/logs/$profile"
 		echo "  $SERVICE_HOME/.docker/$profile and $SERVICE_HOME/.config/$profile"
 	fi
@@ -130,7 +132,8 @@ for profile in "${profiles[@]}"; do
 		continue
 	fi
 	$SUDO systemctl disable --now "amp-orb-provider@$profile.service" 2>/dev/null || true
-	$SUDO rm -f "$ENV_DIR/$profile.env"
+	$SUDO rm -f "$ENV_DIR/$profile.env" "$ENV_DIR/$profile.job.env"
+	$SUDO rm -f "/usr/local/bin/amp-orb-dispatch-$profile"
 	$SUDO rm -rf "$ROOT/state/$profile" "$ROOT/logs/$profile"
 	$SUDO rm -rf "$SERVICE_HOME/.docker/$profile" "$SERVICE_HOME/.config/$profile"
 done
@@ -138,6 +141,7 @@ done
 if [[ "$ALL" -eq 1 ]]; then
 	$SUDO rm -f "$UNIT"
 	$SUDO rm -f /usr/local/bin/amp
+	$SUDO find /usr/local/bin -maxdepth 1 -name 'amp-orb-dispatch-*' -delete 2>/dev/null || true
 fi
 
 $SUDO systemctl daemon-reload

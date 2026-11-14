@@ -9,7 +9,7 @@
 		<string>__AMP_BIN__</string>
 		<string>orb</string>
 		<string>provider</string>
-		<string>__ROOT__/dispatch.py</string>
+		<string>__LAUNCHER__</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
