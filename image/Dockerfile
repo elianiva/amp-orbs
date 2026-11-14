@@ -12,18 +12,8 @@
 ARG BASE_IMAGE=us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb:latest
 FROM ${BASE_IMAGE}
 
-ARG PLAYWRIGHT_VERSION=latest
-
 USER root
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-
-# Amp's image ships agent-browser with a bundled Chrome and Chrome's libraries,
-# but not Playwright or the WebKitGTK stack. Agents that run Playwright then
-# download browsers and print "Host system is missing dependencies" on first
-# use. Install the latest Playwright and all three browsers here so new orbs
-# start ready. PLAYWRIGHT_BROWSERS_PATH puts them somewhere every user can
-# read, instead of root's cache.
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Docker Sandboxes runs commands as an `agent` account with uid 1000 and home
 # /home/agent. Amp's image names uid 1000 `user`. Add `agent` as a second name
@@ -33,7 +23,6 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # earlyoom kills Chrome before memory runs out. Amp's own OOM protection runs
 # through systemd, which does not manage a Docker Sandboxes VM.
 RUN <<'EOF'
-export DEBIAN_FRONTEND=noninteractive
 groupadd -o -g 1000 agent
 useradd -o -u 1000 -g 1000 -G "$(id -Gn user | tr ' ' '\n' | grep -vx user | paste -sd,)" \
 	-d /home/agent -M -s /bin/bash agent
@@ -45,12 +34,8 @@ SUDOERS
 chmod 0440 /etc/sudoers.d/agent
 visudo -cf /etc/sudoers.d/agent
 apt-get update
-apt-get upgrade -y -o Dpkg::Options::=--force-confold
 apt-get install -y --no-install-recommends earlyoom
-npm install -g "playwright@${PLAYWRIGHT_VERSION}"
-playwright install --with-deps chromium firefox webkit
 rm -rf /var/lib/apt/lists/*
-chmod -R a+rX /ms-playwright
 EOF
 
 USER agent

@@ -8,7 +8,7 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | --- | --- |
 | `dispatch.py` | Amp dispatch program. Handles `spawn`, `pause`, and `delete` jobs. |
 | `service/amp-orb-dispatch.py` | Launcher template that loads a profile's job env before running `dispatch.py`. |
-| `image/Dockerfile` | Amp's orb image with the `agent` account Docker Sandboxes needs, plus Playwright browsers and dependencies. You build it and push it to Docker Hub. |
+| `image/Dockerfile` | Amp's orb image with the `agent` account Docker Sandboxes needs. You build it and push it to Docker Hub. |
 | `service/install.sh` | Installs the provider service for macOS or Linux. |
 | `service/install-macos.sh` | launchd installer. |
 | `service/install-linux.sh` | systemd installer, one profile per instance. |
@@ -40,7 +40,7 @@ docker buildx build --pull --platform linux/amd64 \
   --push image/
 ```
 
-The build pulls Amp's orb image from Google Artifact Registry, about 1.7 GiB, and adds a layer with Playwright and the browser dependencies. See [Orb image](#orb-image) for what the layer does.
+The build pulls Amp's orb image from Google Artifact Registry, about 1.7 GiB, and adds one small layer. See [Orb image](#orb-image) for what the layer does.
 
 On an arm64 machine, Buildx builds the amd64 image under emulation. Docker Desktop sets this up for you. On Linux, install the emulators first with `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
 
@@ -161,7 +161,7 @@ Docker Sandboxes Cloud cannot boot that image directly, for two reasons:
 - `sbx --cloud create --image-ref` pulls only from Docker Hub (`docker.io`) and `dhi.io`. Amp publishes its image on Google Artifact Registry.
 - Docker Sandboxes runs commands as an `agent` account with uid 1000 and home `/home/agent`. Amp's image names uid 1000 `user`.
 
-`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom (described under VM limits), upgrades the Debian packages, and installs the latest Playwright with Chromium, Firefox, and WebKit under `/ms-playwright`. Amp's image includes `agent-browser` with Chrome, but not Playwright or the WebKitGTK libraries, so without this layer the first Playwright command downloads browsers and reports missing host libraries. [Setup](#1-build-and-publish-the-image) pushes the result to Docker Hub.
+`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom, described under VM limits. [Setup](#1-build-and-publish-the-image) pushes the result to Docker Hub.
 
 For arm64, add `--build-arg BASE_IMAGE=us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` and `--platform linux/arm64`.
 
