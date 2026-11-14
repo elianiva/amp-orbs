@@ -446,37 +446,38 @@ def stop_timer(orb_id: str, sandbox_id: str, deadline: float, token: str) -> Non
 	"""Wait out the warm grace, then stop the sandbox under the orb lock."""
 	while True:
 		remaining = deadline - time.time()
-		if remaining > 0:
-			time.sleep(min(remaining, 30))
-		value = read_timer(orb_id)
-		if not value or value.get("token") != token:
-			log("scheduled stop was canceled")
-			return
-		try:
-			with orb_lock(orb_id):
-				value = read_timer(orb_id)
-				if not value or value.get("token") != token:
-					log("scheduled stop was canceled")
-					return
-				info = inspect_sandbox(sandbox_id)
-				state = str((info or {}).get("state") or "unknown")
-				if info is None:
-					log("sandbox is gone; dropping the scheduled stop")
-				elif state == "running":
-					log(f"stopping {sandbox_id} after the warm grace period")
-					proc = run(["stop", sandbox_id], timeout=60, check=False)
-					if proc.returncode != 0:
-						log(
-							"WARNING scheduled stop failed: "
-							f"{tail(proc.stderr or proc.stdout)}"
-						)
-				else:
-					log(f"sandbox is {state}; no scheduled stop needed")
-				remove_timer(orb_id)
+		if remaining <= 0:
+			break
+		time.sleep(min(remaining, 30))
+	value = read_timer(orb_id)
+	if not value or value.get("token") != token:
+		log("scheduled stop was canceled")
+		return
+	try:
+		with orb_lock(orb_id):
+			value = read_timer(orb_id)
+			if not value or value.get("token") != token:
+				log("scheduled stop was canceled")
 				return
-		except DispatchError as error:
-			log(f"scheduled stop is waiting for the orb lock: {error}")
-			time.sleep(TIMER_RETRY)
+			info = inspect_sandbox(sandbox_id)
+			state = str((info or {}).get("state") or "unknown")
+			if info is None:
+				log("sandbox is gone; dropping the scheduled stop")
+			elif state == "running":
+				log(f"stopping {sandbox_id} after the warm grace period")
+				proc = run(["stop", sandbox_id], timeout=60, check=False)
+				if proc.returncode != 0:
+					log(
+						"WARNING scheduled stop failed: "
+						f"{tail(proc.stderr or proc.stdout)}"
+					)
+			else:
+				log(f"sandbox is {state}; no scheduled stop needed")
+			remove_timer(orb_id)
+			return
+	except DispatchError as error:
+		log(f"scheduled stop is waiting for the orb lock: {error}")
+		time.sleep(TIMER_RETRY)
 
 
 def reap_stop_timers() -> None:
