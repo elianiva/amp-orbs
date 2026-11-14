@@ -16,6 +16,140 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | `state/` | Durable `ORB_ID` to sandbox mapping. |
 | `logs/` | Provider logs on macOS; Linux uses the journal. |
 
+## Setup
+
+You need:
+
+- A Docker account with an active [Docker Agentic Platform subscription](https://docs.docker.com/agentic-platform/signup/), which gives access to cloud sandboxes. Docker bills cloud compute per hour.
+- A Docker Hub repository for the orb image, such as `docker.io/<user>/amp-orb`.
+- A machine with Docker and Buildx to build the image, such as your laptop.
+- A host for the provider: a Linux server with systemd, or a Mac with Apple silicon. It runs only `amp orb provider` and `sbx`, so it needs no virtualization support.
+- An Amp account. A personal provider works. A workspace provider needs a workspace admin.
+
+### 1. Build and publish the image
+
+On the build machine:
+
+```sh
+docker login
+git clone https://github.com/elianiva/amp-orbs
+cd amp-orbs
+docker buildx build --pull --platform linux/amd64 \
+  -t docker.io/<user>/amp-orb:2026-11-14 -t docker.io/<user>/amp-orb:latest \
+  --push image/
+```
+
+The build pulls Amp's orb image from Google Artifact Registry, about 1.7 GiB, and adds one small layer. See [Orb image](#orb-image) for what the layer does.
+
+On an arm64 machine, Buildx builds the amd64 image under emulation. Docker Desktop sets this up for you. On Linux, install the emulators first with `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
+
+A public repository is the simplest choice. A private repository works only if the Docker account that the provider signs in with can pull it.
+
+### 2. Create the provider in Amp
+
+1. Open **Settings → Orbs**, either your [personal settings](https://ampcode.com/settings/orbs) or your workspace settings, and click **Add Orb Provider**. Name it, for example `Docker`. Members pick the provider by this name.
+2. Copy the provider token. It starts with `aop_live_`. The Linux setup script asks for it.
+3. Click **Edit** on the provider. Under **Orb types**, add `micro`, `small`, `medium`, `large`, and `xl`, and select `medium` as the default. The CLI cannot set orb types. See [Orb types](#orb-types) for their sizes.
+
+On macOS, you can run `amp orb provider create <name>` instead of steps 1 and 2. It creates the provider and saves its token with your Amp credentials, which the launchd service uses.
+
+### 3. Prepare the provider host
+
+Create a Docker personal access token (PAT) for the subscribed account in Docker Hub under **Account settings → Personal access tokens**. The provider host signs `sbx` in with it.
+
+On Ubuntu, install `sbx`, Amp, and this repository as the user that will run the service:
+
+```sh
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
+sudo apt-get install docker-sbx
+curl -fsSL https://ampcode.com/install.sh | bash
+git clone https://github.com/elianiva/amp-orbs ~/Development/amp-orbs
+```
+
+For other distributions, install the `.rpm` or `.deb` package from the [sbx releases](https://github.com/docker/sbx-releases/releases). Cloud sandboxes do not need KVM, so skip the `kvm` group steps in Docker's install guide. The host also needs `python3`, `git`, and `sudo`.
+
+On macOS:
+
+```sh
+brew trust docker/tap
+brew install docker/tap/sbx
+curl -fsSL https://ampcode.com/install.sh | bash
+git clone https://github.com/elianiva/amp-orbs ~/Development/amp-orbs
+```
+
+Cloud sandboxes need `sbx` 0.45.0 or later.
+
+### 4. Install the provider service
+
+On Linux, run the setup script as the service user, not as root:
+
+```sh
+cd ~/Development/amp-orbs
+./service/setup-linux.sh docker-personal --provider Docker \
+  --docker-user <user> --image docker.io/<user>/amp-orb:2026-11-14
+```
+
+`docker-personal` is the profile name. The script asks for the Docker PAT, then for the provider token. It then does these steps:
+
+- It signs `sbx` in under a config directory for this profile and runs `sbx --cloud diagnose`.
+- It writes `/etc/amp-orbs/docker-personal.env` with mode 600.
+- It copies the Amp binary to `/usr/local/bin/amp`, so SELinux lets systemd run it.
+- It starts `amp-orb-provider@docker-personal.service`, which logs to the journal.
+
+On macOS, sign `sbx` in and install the launchd service:
+
+```sh
+sbx login
+sbx --cloud diagnose
+cd ~/Development/amp-orbs
+AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:2026-11-14 ./service/install.sh
+```
+
+The service starts at login and logs to `logs/provider.err.log`.
+
+### 5. Test a thread
+
+Start a thread on the provider:
+
+```sh
+amp -ox "Reply with OK." --orb-provider Docker
+```
+
+The first orb from a new image tag takes longer, because Docker Cloud pulls the whole image. Follow the provider log while it starts. On Linux, run `journalctl -u amp-orb-provider@docker-personal -f`. On macOS, run `tail -f logs/provider.err.log`.
+
+Continue the same thread to test pause and resume:
+
+```sh
+amp threads continue <thread-id> -ox "Reply with RESUMED."
+```
+
+The thread's sandbox is named `amp-<thread id>`. Check that it started earlyoom:
+
+```sh
+sbx --cloud exec amp-<thread id> bash -lc 'grep ^pid1= /home/user/.amp-bootstrap.log | tail -1'
+```
+
+The line ends with `earlyoom=on`.
+
+To make the provider the default for new threads, select it in **Settings → Orbs**, or run `amp orb provider set-default Docker`. Add `--workspace` to set the workspace default.
+
+### Update the image
+
+Amp updates its orb image often. To roll out a new version:
+
+1. Build and push the image again with a new dated tag, as in step 1. `--pull` fetches Amp's latest image.
+2. Point the provider at the new tag and restart it. On Linux:
+
+   ```sh
+   sudo sed -i 's|^AMP_ORBS_IMAGE=.*|AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:<new-tag>|' \
+     /etc/amp-orbs/docker-personal.env
+   sudo systemctl restart amp-orb-provider@docker-personal
+   ```
+
+   On macOS, run `./service/install.sh` again with the new `AMP_ORBS_IMAGE`.
+
+Only new orbs use the new image. Existing sandboxes and project snapshots keep the image they started from.
+
 ## Orb image
 
 Orbs boot from Amp's own orb image, `us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb:latest`. It has the Amp CLI, agent-browser with Chrome, Node, Bun, Python, uv, gh, nix, and the tools for portals, Terminal, and Desktop.
@@ -25,19 +159,13 @@ Docker Sandboxes Cloud cannot boot that image directly, for two reasons:
 - `sbx --cloud create --image-ref` pulls only from Docker Hub (`docker.io`) and `dhi.io`. Amp publishes its image on Google Artifact Registry.
 - Docker Sandboxes runs commands as an `agent` account with uid 1000 and home `/home/agent`. Amp's image names uid 1000 `user`.
 
-`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom, described under VM limits. You push the result to Docker Hub:
-
-```sh
-docker buildx build --pull --platform linux/amd64 \
-  -t docker.io/<user>/amp-orb:2026-11-13 -t docker.io/<user>/amp-orb:latest \
-  --push image/
-```
+`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom, described under VM limits. [Setup](#1-build-and-publish-the-image) pushes the result to Docker Hub.
 
 For arm64, add `--build-arg BASE_IMAGE=us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` and `--platform linux/arm64`.
 
 Put the full reference, with the `docker.io/` prefix, in `AMP_ORBS_IMAGE`. `sbx` does not add the registry for you. The dispatcher creates each sandbox with `sbx --cloud create --image-ref <image> --cpus N --memory M`, so one image serves every orb type.
 
-Amp updates its image often. Rebuild with `--pull` to pick up a new version. A new tag only affects new orbs. Existing sandboxes keep their disk and do not pick up the new image. Pin a dated tag in `AMP_ORBS_IMAGE` if you want to roll out deliberately, then restart the provider after you change it.
+Pin a dated tag in `AMP_ORBS_IMAGE`, so that you choose when orbs move to a new image. See [Update the image](#update-the-image).
 
 ### VM limits
 
@@ -67,8 +195,6 @@ The provider exposes five variants of the same image:
 | `medium` | 4 vCPU / 8 GiB |
 | `large` | 8 vCPU / 16 GiB |
 | `xl` | 16 vCPU / 32 GiB |
-
-Add `micro`, `small`, `medium`, `large`, and `xl` under **Orb types** in the provider's Edit dialog in Amp settings, and select `medium` as the default. The CLI has no command for this setting.
 
 `ORB_TYPE` selects one of `micro`, `small`, `medium`, `large`, or `xl`. If it is unset, the dispatcher uses `medium`. If a project snapshot has a different CPU or memory shape, the dispatcher ignores it for that type, boots the image, and runs `.agents/setup`.
 
@@ -125,42 +251,11 @@ A sandbox older than 24 hours cannot be extended. Each wake then lasts only the 
 
 Check a sandbox's expiry with `sbx --cloud ttl <name> --json`.
 
-## Register and run the provider
+## Provider service
 
-Create a provider token for each Amp account or workspace. On macOS, this saves it with your Amp credentials:
+[Setup](#4-install-the-provider-service) installs the service. This section covers removing profiles, installing without the setup script, and running several accounts on one host.
 
-```sh
-amp orb provider create melon-sbx
-```
-
-On Linux, pass the token to the installer as `AMP_ORB_PROVIDER_TOKEN`.
-
-### macOS
-
-```sh
-cd ~/Development/amp-orbs
-AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:latest ./service/install.sh
-```
-
-The installer renders the launchd plist with this checkout's path and starts the service at login. Logs are in `logs/provider.err.log`.
-
-### Linux
-
-#### One-command setup
-
-Run this as the service user on the Linux host:
-
-```sh
-cd ~/Development/amp-orbs
-./service/setup-linux.sh docker-personal --provider Docker \
-  --image docker.io/<user>/amp-orb:latest
-```
-
-The script prompts for the Docker Hub username unless you pass `--docker-user`, then for the Docker PAT. `--image` defaults to `docker.io/<docker-user>/amp-orb:latest`. The script fixes `sbx` local storage permissions, logs in the profile, installs the systemd service, and checks the provider process. The installer copies the Amp binary to `/usr/local/bin/amp` so SELinux can execute it, and sends the service logs to the journal.
-
-The provider types cannot be set by the CLI. Confirm `micro`, `small`, `medium`, `large`, and `xl` in Amp Settings → Orbs → `Docker` → Edit.
-
-#### Reset
+### Reset
 
 Remove one profile:
 
@@ -176,7 +271,7 @@ Remove every profile, the systemd unit, and `/usr/local/bin/amp`:
 
 The script stops and disables the service, then removes the env file, state, logs, and the profile's `sbx` config. It does not delete the Amp provider, project snapshot templates, or cloud sandboxes. Remove test sandboxes with `sbx --cloud rm --force` and manage the provider in Settings → Orbs.
 
-#### Manual setup
+### Manual setup on Linux
 
 Log in `sbx` for the profile first. Use the same config directories that the installer uses:
 
@@ -196,7 +291,7 @@ sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' \
 
 The installer writes `/etc/amp-orbs/melon-sbx.env` with mode 600, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `journalctl -u amp-orb-provider@melon-sbx`.
 
-### Multiple accounts on one VPS
+### Multiple accounts on one host
 
 Create one provider token per Amp account or workspace and pass it to that profile's service as `AMP_ORB_PROVIDER_TOKEN`. The provider uses the token, so the host does not need a saved Amp account.
 
@@ -204,7 +299,7 @@ Create one provider token per Amp account or workspace and pass it to that profi
 
 Run one `amp-orb-provider@<profile>.service` per profile. Each instance has its own token, `sbx` config, state directory, journal logs, and image setting. Profiles can share one public image. Never run two providers for the same token. `--allow-multiple` is only for dispatch programs that share state.
 
-#### Example: two profiles
+### Example: two profiles
 
 This example uses the installer's default config directories, two provider tokens, and one public image.
 
@@ -238,20 +333,6 @@ Their state directories are separate:
 ```text
 state/melon-sbx/    state/work-sbx/
 ```
-
-## Test a thread
-
-```sh
-amp -ox "Reply with OK." --orb-provider Docker
-```
-
-Continue the same thread to test resume:
-
-```sh
-amp threads continue <thread-id> -ox "Reply with RESUMED."
-```
-
-A thread's sandbox is named `amp-<thread id>`. Check it with `sbx --cloud ls` and `sbx --cloud inspect <name> --format json`.
 
 ## Troubleshooting
 
