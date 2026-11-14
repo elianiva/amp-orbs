@@ -7,7 +7,8 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | Path | Purpose |
 | --- | --- |
 | `dispatch.py` | Amp dispatch program. Handles `spawn`, `pause`, and `delete` jobs. |
-| `image/Dockerfile` | Amp's orb image with the `agent` account Docker Sandboxes needs. You build it and push it to Docker Hub. |
+| `service/amp-orb-dispatch.py` | Launcher template that loads a profile's job env before running `dispatch.py`. |
+| `image/Dockerfile` | Amp's orb image with the `agent` account Docker Sandboxes needs, plus Playwright browsers and dependencies. You build it and push it to Docker Hub. |
 | `service/install.sh` | Installs the provider service for macOS or Linux. |
 | `service/install-macos.sh` | launchd installer. |
 | `service/install-linux.sh` | systemd installer, one profile per instance. |
@@ -39,7 +40,7 @@ docker buildx build --pull --platform linux/amd64 \
   --push image/
 ```
 
-The build pulls Amp's orb image from Google Artifact Registry, about 1.7 GiB, and adds one small layer. See [Orb image](#orb-image) for what the layer does.
+The build pulls Amp's orb image from Google Artifact Registry, about 1.7 GiB, and adds a layer with Playwright and the browser dependencies. See [Orb image](#orb-image) for what the layer does.
 
 On an arm64 machine, Buildx builds the amd64 image under emulation. Docker Desktop sets this up for you. On Linux, install the emulators first with `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
 
@@ -92,7 +93,8 @@ cd ~/Development/amp-orbs
 `docker-personal` is the profile name. The script asks for the Docker PAT, then for the provider token. It then does these steps:
 
 - It signs `sbx` in under a config directory for this profile and runs `sbx --cloud diagnose`.
-- It writes `/etc/amp-orbs/docker-personal.env` with mode 600.
+- It writes `/etc/amp-orbs/docker-personal.env` with the provider token and mode 600, and `/etc/amp-orbs/docker-personal.job.env` with the non-secret orb settings and mode 644.
+- It installs the per-profile launcher `/usr/local/bin/amp-orb-dispatch-docker-personal`. `amp orb provider` runs job scripts with a sanitized environment, so the launcher loads the job env before running `dispatch.py`.
 - It copies the Amp binary to `/usr/local/bin/amp`, so SELinux lets systemd run it.
 - It starts `amp-orb-provider@docker-personal.service`, which logs to the journal.
 
@@ -142,7 +144,7 @@ Amp updates its orb image often. To roll out a new version:
 
    ```sh
    sudo sed -i 's|^AMP_ORBS_IMAGE=.*|AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:<new-tag>|' \
-     /etc/amp-orbs/docker-personal.env
+     /etc/amp-orbs/docker-personal.job.env /etc/amp-orbs/docker-personal.env
    sudo systemctl restart amp-orb-provider@docker-personal
    ```
 
@@ -159,7 +161,7 @@ Docker Sandboxes Cloud cannot boot that image directly, for two reasons:
 - `sbx --cloud create --image-ref` pulls only from Docker Hub (`docker.io`) and `dhi.io`. Amp publishes its image on Google Artifact Registry.
 - Docker Sandboxes runs commands as an `agent` account with uid 1000 and home `/home/agent`. Amp's image names uid 1000 `user`.
 
-`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom, described under VM limits. [Setup](#1-build-and-publish-the-image) pushes the result to Docker Hub.
+`image/Dockerfile` adds one layer on top of Amp's image. The layer adds `agent` as a second name for uid 1000, with the same groups and passwordless sudo, and keeps the sandbox proxy variables across sudo. It also installs earlyoom (described under VM limits), upgrades the Debian packages, and installs the latest Playwright with Chromium, Firefox, and WebKit under `/ms-playwright`. Amp's image includes `agent-browser` with Chrome, but not Playwright or the WebKitGTK libraries, so without this layer the first Playwright command downloads browsers and reports missing host libraries. [Setup](#1-build-and-publish-the-image) pushes the result to Docker Hub.
 
 For arm64, add `--build-arg BASE_IMAGE=us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` and `--platform linux/arm64`.
 
@@ -200,7 +202,7 @@ The provider exposes five variants of the same image:
 
 ## Dispatch behavior
 
-Amp runs `dispatch.py` once per job. The program reads `ORB_OPERATION`, `ORB_ID`, `ORB_IMAGE`, `ORB_SNAPSHOT_ID`, `ORB_TYPE`, `ORB_TOKEN`, and `AMP_URL`.
+Amp runs the profile's launcher once per job. The launcher loads `/etc/amp-orbs/<profile>.job.env` and then runs `dispatch.py`. The provider itself inherits `/etc/amp-orbs/<profile>.env`, but it sanitizes the environment it passes to the job script, so the launcher is what makes `AMP_ORBS_*` visible. The dispatcher reads `ORB_OPERATION`, `ORB_ID`, `ORB_IMAGE`, `ORB_SNAPSHOT_ID`, `ORB_TYPE`, `ORB_TOKEN`, and `AMP_URL` from the job.
 
 ### spawn
 
@@ -289,7 +291,7 @@ sudo env AMP_ORB_PROVIDER_TOKEN='aop_live_...' \
   ./service/install-linux.sh melon-sbx
 ```
 
-The installer writes `/etc/amp-orbs/melon-sbx.env` with mode 600, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `journalctl -u amp-orb-provider@melon-sbx`.
+The installer writes `/etc/amp-orbs/melon-sbx.env` with the provider token and mode 600, and `/etc/amp-orbs/melon-sbx.job.env` with the non-secret orb settings. It installs `/usr/local/bin/amp-orb-dispatch-melon-sbx`, renders `/etc/systemd/system/amp-orb-provider@.service`, runs `sbx --cloud diagnose` with the profile, and starts `amp-orb-provider@melon-sbx.service`. Logs go to `journalctl -u amp-orb-provider@melon-sbx`.
 
 ### Multiple accounts on one host
 
