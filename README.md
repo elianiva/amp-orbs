@@ -1,6 +1,6 @@
 # amp-orbs
 
-A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`). It runs one cloud sandbox per Amp thread, bootstraps Amp inside it, and preserves the sandbox disk across pauses.
+A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`). It runs one cloud sandbox per Amp thread, bootstraps Amp inside it, and preserves the sandbox disk and VM state across pauses.
 
 ## Files
 
@@ -12,10 +12,11 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | `service/install.sh` | Installs the provider service for macOS or Linux. |
 | `service/install-macos.sh` | launchd installer. |
 | `service/install-linux.sh` | systemd installer, one profile per instance. |
+| `service/create-base-templates.sh` | Creates per-shape memory checkpoints for fast cold starts. |
 | `service/com.elianiva.amp-orb-provider.plist` | launchd template. |
 | `service/amp-orb-provider@.service` | systemd template unit. |
-| `state/` | Durable `ORB_ID` to sandbox mapping. |
-| `logs/` | Provider logs on macOS; Linux uses the journal. |
+| `state/` | Durable `ORB_ID` to sandbox mapping, plus scheduled stop timers. |
+| `logs/` | Provider logs on macOS; Linux uses the journal. Timer logs are here too. |
 
 ## Setup
 
@@ -109,6 +110,23 @@ AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:2026-11-14 ./service/install.sh
 
 The service starts at login and logs to `logs/provider.err.log`.
 
+### 4b. Create the base checkpoints
+
+Docker Cloud can restore a memory-plus-disk checkpoint in a few seconds. The helper creates one checkpoint per orb type from a credential-free sandbox:
+
+```sh
+DOCKER_CONFIG="$HOME/.docker/docker-personal" \
+XDG_CONFIG_HOME="$HOME/.config/docker-personal" \
+AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:2026-11-14 \
+  ./service/create-base-templates.sh micro small medium
+```
+
+Run it as the service user with the profile's `DOCKER_CONFIG` and `XDG_CONFIG_HOME`. It creates `amp-base-<tag>-<arch>-<type>` templates, which `dispatch.py` derives from `AMP_ORBS_IMAGE` automatically. The name means a new image tag needs new templates; old ones can be removed with `sbx --cloud template rm --force`.
+
+Each checkpoint takes a few minutes to save and stores several GB: about 16.6 GB for `micro`, 29.5 GB for `small`, and 44.5 GB for `medium` on the current image. Larger types scale from there. Create only the types you use; a type without a checkpoint boots from the image and is slower. See [Performance](#performance).
+
+On macOS, run the same command with `AMP_ORBS_IMAGE=... ./service/create-base-templates.sh micro small medium` after `sbx login`.
+
 ### 5. Test a thread
 
 Start a thread on the provider:
@@ -117,7 +135,7 @@ Start a thread on the provider:
 amp -ox "Reply with OK." --orb-provider Docker
 ```
 
-The first orb from a new image tag takes longer, because Docker Cloud pulls the whole image. Follow the provider log while it starts. On Linux, run `journalctl -u amp-orb-provider@docker-personal -f`. On macOS, run `tail -f logs/provider.err.log`.
+The first orb from a new image tag takes longer if no checkpoint exists, because Docker Cloud pulls the whole image. With a checkpoint for the orb type, a new orb boots from the memory checkpoint in a few seconds. Follow the provider log while it starts. On Linux, run `journalctl -u amp-orb-provider@docker-personal -f`. On macOS, run `tail -f logs/provider.err.log`.
 
 Continue the same thread to test pause and resume:
 
@@ -150,6 +168,17 @@ Amp updates its orb image often. To roll out a new version:
 
    On macOS, run `./service/install.sh` again with the new `AMP_ORBS_IMAGE`.
 
+3. Create checkpoints for the new tag and remove the old tag's checkpoints:
+
+   ```sh
+   AMP_ORBS_IMAGE=docker.io/<user>/amp-orb:<new-tag> \
+     ./service/create-base-templates.sh micro small medium
+   sbx --cloud template ls
+   sbx --cloud template rm --force amp-base-<old-tag>-amd64-micro
+   ```
+
+   The prefix uses the image tag, not the digest. Re-pushing the same tag keeps using the old checkpoint, so use a dated tag for every rollout. Run the helper with the same `DOCKER_CONFIG` and `XDG_CONFIG_HOME` as the profile, as in step 4b.
+
 Only new orbs use the new image. Existing sandboxes and project snapshots keep the image they started from.
 
 ## Orb image
@@ -165,7 +194,7 @@ Docker Sandboxes Cloud cannot boot that image directly, for two reasons:
 
 For arm64, add `--build-arg BASE_IMAGE=us-central1-docker.pkg.dev/amp-prod-0/amp-orb/amp-orb-arm64:latest` and `--platform linux/arm64`.
 
-Put the full reference, with the `docker.io/` prefix, in `AMP_ORBS_IMAGE`. `sbx` does not add the registry for you. The dispatcher creates each sandbox with `sbx --cloud create --image-ref <image> --cpus N --memory M`, so one image serves every orb type.
+Put the full reference, with the `docker.io/` prefix, in `AMP_ORBS_IMAGE`. `sbx` does not add the registry for you. The dispatcher creates each new sandbox from the type's memory checkpoint when one exists, otherwise with `sbx --cloud create --image-ref <image> --cpus N --memory M`, so one image serves every orb type.
 
 Pin a dated tag in `AMP_ORBS_IMAGE`, so that you choose when orbs move to a new image. See [Update the image](#update-the-image).
 
@@ -198,7 +227,7 @@ The provider exposes five variants of the same image:
 | `large` | 8 vCPU / 16 GiB |
 | `xl` | 16 vCPU / 32 GiB |
 
-`ORB_TYPE` selects one of `micro`, `small`, `medium`, `large`, or `xl`. If it is unset, the dispatcher uses `medium`. If a project snapshot has a different CPU or memory shape, the dispatcher ignores it for that type, boots the image, and runs `.agents/setup`.
+`ORB_TYPE` selects one of `micro`, `small`, `medium`, `large`, or `xl`. If it is unset, the dispatcher uses `medium`. If a project snapshot has a different CPU or memory shape, the dispatcher ignores it for that type and boots the base for that type instead. A new orb without a usable project snapshot uses the type's `amp-base-*` checkpoint when it exists; otherwise it boots `AMP_ORBS_IMAGE` and runs `.agents/setup`.
 
 ## Dispatch behavior
 
@@ -208,10 +237,14 @@ Amp runs the profile's launcher once per job. The launcher loads `/etc/amp-orbs/
 
 1. Read `state/orbs/<hash>.json` and inspect the mapped sandbox.
 2. If the mapping is missing or stale, list cloud sandboxes and match the name derived from `ORB_ID`. This prevents a second sandbox after a reboot or a lost state file.
-3. Create the sandbox if it does not exist. It boots from a project snapshot when one exists, otherwise from `AMP_ORBS_IMAGE` with the type's CPU and memory.
-4. Resume the sandbox if it is stopped. A running sandbox is a no-op.
-5. Kill any previous `amp orb bootstrap` process and start a new one as `agent` with `HOME=/home/user` and this job's `ORB_TOKEN`. Tokens are single-use and expire after 15 minutes, so reusing a bootstrap from an earlier spawn is not valid.
-6. Wait four seconds and fail the job if the bootstrap process is gone. The error includes the tail of `/home/user/.amp-bootstrap.log` from the sandbox.
+3. Create the sandbox if it does not exist:
+   - Use a project snapshot when one exists and its CPU and memory match the requested type.
+   - Otherwise use the type's `amp-base-<tag>-<arch>-<type>` memory checkpoint when it is completed and has the right shape.
+   - Otherwise boot `AMP_ORBS_IMAGE` with the type's CPU and memory.
+   - If a checkpoint create fails, remove the partial sandbox and retry from the image.
+4. Resume the sandbox if it is stopped. A running sandbox is a no-op. A `stopping` or `hibernating` sandbox is waited out before resuming.
+5. Start the TTL refresh in a background thread and restart the bootstrap with this job's `ORB_TOKEN`. The TTL call runs in parallel with the bootstrap, so it is not on the critical path.
+6. The bootstrap launcher waits `AMP_ORBS_BOOTSTRAP_SETTLE` seconds (default 2), then polls for the new bootstrap PID. It fails the job with the tail of `/home/user/.amp-bootstrap.log` if the process does not survive. This replaces the old second `sbx exec` and avoids mistaking an older `amp` process for the new one.
 
 `ORB_IMAGE` is logged and ignored. Docker Cloud only accepts images from Docker Hub (`docker.io`, `registry-1.docker.io`, `index.docker.io`) and `dhi.io`, and Amp's default image is on `us-central1-docker.pkg.dev`. `AMP_ORBS_IMAGE` replaces it with the Docker Hub copy that `image/Dockerfile` builds.
 
@@ -220,16 +253,36 @@ Amp runs the profile's launcher once per job. The launcher loads `/etc/amp-orbs/
 ### pause
 
 1. If `ORB_SNAPSHOT_ID` is set and the sandbox is running, save a cloud template named `amp-snap-<sha256(snapshot_id)[:16]>` with `--capture-mode disk`. An existing snapshot template is reused.
-2. Stop the sandbox with `sbx --cloud stop`. Wait up to 150 seconds for the state to become `stopped`. If Docker is still stopping, the stop request is accepted and the job succeeds; the next spawn waits up to 220 seconds for the sandbox to settle before resuming it. The sandbox keeps its ID, disk, and memory.
-3. If the snapshot save fails or times out, the sandbox is still stopped and the failure is logged. The provider never reports a snapshot that was not saved.
+2. If the sandbox is running and `AMP_ORBS_PAUSE_GRACE` is greater than zero (default `10m`), write a timer and return immediately. A detached process stops the sandbox when the grace expires. A spawn, another pause, or a delete for the same orb cancels or replaces the timer, so a return inside the window finds the VM already running and skips the ~6 second resume.
+3. With `AMP_ORBS_PAUSE_GRACE=0`, or if the timer cannot start, stop immediately. `stop` returns once Docker accepts the request; the pause job no longer waits for `stopped`. The next spawn waits for the hibernation to settle.
+4. If the snapshot save fails or times out, the sandbox is still stopped and the failure is logged. The provider never reports a snapshot that was not saved.
+
+The timer lives in `state/timers/<hash>.json` and logs to `logs/<hash>.timer.log`. It survives normal job exits. A provider service restart kills it; the next job re-arms any dead timer it finds. If no job arrives, Docker's 24-hour TTL stops the sandbox. While the sandbox is warm it is still running, so Docker bills compute for the grace window: about $0.02 for 10 minutes on a small orb at $0.14/hr, or $0.05 on a medium orb at $0.28/hr. Use a shorter grace or `0` to reduce that.
 
 ### delete
 
-1. Wait for a `stopping` or `hibernating` sandbox to settle.
-2. Run `sbx --cloud rm --force` and retry while Docker reports the hibernation workflow is still running.
-3. Verify the sandbox is gone and remove the state file.
+1. Cancel any scheduled stop for this orb.
+2. Wait for a `stopping` or `hibernating` sandbox to settle.
+3. Run `sbx --cloud rm --force` and retry while Docker reports the hibernation workflow is still running.
+4. Verify the sandbox is gone and remove the state file.
 
 Snapshot templates are not deleted with the sandbox because Amp project snapshots can be shared by several threads. Remove them with `sbx --cloud template rm --force <name>` when they are no longer needed.
+
+### Settings
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AMP_ORBS_IMAGE` | none | Full Docker Hub image reference, such as `docker.io/<user>/amp-orb:2026-11-14`. |
+| `AMP_ORBS_DEFAULT_TYPE` | `medium` | Orb type when `ORB_TYPE` is unset. |
+| `AMP_ORBS_TTL` | `24h` | Initial sandbox TTL. Spawn pushes it back to Docker's 24-hour ceiling. |
+| `AMP_ORBS_PAUSE_GRACE` | `10m` | Keep a paused sandbox warm before stopping it. `0` stops immediately. |
+| `AMP_ORBS_BOOTSTRAP_SETTLE` | `2` | Seconds to wait before checking for the new bootstrap PID. |
+| `AMP_ORBS_BASE_TEMPLATE_PREFIX` | `amp-base-<image tag>` | Checkpoint name prefix. Set to `off` to disable checkpoints. |
+| `AMP_ORBS_SBX` | auto-detected | Path to `sbx`. |
+| `AMP_ORBS_STATE` | `<root>/state` | State and timer directory. |
+| `AMP_ORBS_LOGS` | `<root>/logs` | Bootstrap and timer logs. |
+
+`AMP_ORBS_TEMPLATE_SETTLE` (default 20 seconds) is only read by `service/create-base-templates.sh`. It controls how long the source sandbox settles before the checkpoint is saved.
 
 ## Sandbox naming and lookup
 
@@ -250,6 +303,8 @@ sandbox expires at 2026-11-14T19:02:43Z, in 21.0h; Docker's 24h ceiling is 2026-
 ```
 
 A sandbox older than 24 hours cannot be extended. Each wake then lasts only the resume timeout, and the log says `WARNING this orb stops at ...`. When Docker stops the sandbox, Amp loses the orb until the next message sends a new spawn, which resumes it with its disk intact.
+
+Pause keeps a sandbox warm for `AMP_ORBS_PAUSE_GRACE` (default 10 minutes) before stopping it. If that timer process dies during a provider restart and no job arrives, Docker's 24-hour TTL is the cap; the next job re-arms the timer. Set `AMP_ORBS_PAUSE_GRACE=0` to stop as soon as the pause job finishes.
 
 Check a sandbox's expiry with `sbx --cloud ttl <name> --json`.
 
@@ -343,8 +398,38 @@ state/melon-sbx/    state/work-sbx/
   `sbx --cloud exec <sandbox> bash -lc 'tail -50 /home/user/.amp-bootstrap.log'`
 - Run `sbx --cloud diagnose` to check Docker sign-in, cloud connectivity, and account access.
 - Check project snapshots with `sbx --cloud template ls` and `sbx --cloud template inspect <name> --format json`.
+- If a new orb is slow, check for `amp-base-<image tag>-<arch>-<type>` in `sbx --cloud template ls`. The status must be `completed` and the shape must match the orb type. Create or replace it with `service/create-base-templates.sh`.
+- If a checkpoint create fails, the dispatcher logs a warning, removes the partial sandbox, and retries from `AMP_ORBS_IMAGE`. The orb still starts, just more slowly.
+- Inspect scheduled stops with `ls state/timers/` and `tail -50 logs/*.timer.log`. The timer fires after `AMP_ORBS_PAUSE_GRACE`; a service restart kills it and the next job re-arms it.
+- A paused orb can stay `running` during the grace period and then take one to three minutes to reach `stopped`. That is Docker hibernating it, not a stuck provider job.
+- A restored checkpoint keeps the build sandbox's hostname. Check the sandbox ID or name, not the hostname, when identifying an orb.
 - If `create` fails to pull the image, check that `AMP_ORBS_IMAGE` has the `docker.io/` prefix and that the profile's Docker account can pull it.
 - If a sandbox is stuck in `hibernating`, wait for the workflow to settle and retry `sbx --cloud rm --force`.
+
+## Performance
+
+Measured on a Linux provider against Docker Cloud on 2026-11-14. Times are wall-clock from the provider or dispatcher log and vary with Docker placement and image cache state.
+
+| Path | Before | After |
+| --- | ---: | ---: |
+| New orb, cold image placement | 77s (create 61s) | ~10s |
+| New orb, warm image placement | 34s | ~10s |
+| New orb, memory checkpoint | not used | create 4.7s; ~10s with bootstrap |
+| Resume a fully stopped sandbox | 17s | ~12s |
+| Return inside the warm grace | not possible | ~5s (bootstrap only) |
+| Pause job, no project snapshot | ~150s | 1.3s |
+| Pause job, with a project snapshot | 243s | ~65–90s (snapshot save only) |
+| `stop` to `stopped` | ~186s | 64–186s (server-side) |
+
+The checkpoint path removes the image pull from the critical path. Creating from the micro, small, and medium checkpoints took 4.7 seconds each through the dispatcher, including template and sandbox inspection; a direct micro restore took 2 seconds. A resumed micro sandbox took 6.2 seconds to reach `running` and 4.4 seconds to restart the bootstrap. Docker still takes one to three minutes to hibernate a sandbox after `stop`; the warm grace is what hides that from a quick return. The remaining floor is the VM resume (about 6 seconds) plus the Amp bootstrap (about 4 seconds), so Docker Cloud cannot match e2b's sub-second restore.
+
+### Checkpoint cost and safety
+
+- A checkpoint stores memory and disk. On the current image: about 16.6 GB for `micro`, 29.5 GB for `small`, and 44.5 GB for `medium`. Create only the types you use.
+- Docker bills cloud compute per hour. Storage quota and cost for templates are not documented; watch your Docker account usage.
+- Create checkpoints only from a credential-free sandbox. The helper boots the published image and saves before any bootstrap, so no Amp token or project secret is in the checkpoint. Never save a checkpoint from a sandbox that has seen a token, secret, or project files.
+- A restored checkpoint keeps the hostname of the sandbox that created it. Exec, networking, and tools work normally; the sandbox ID and name are still unique.
+- Checkpoints are tied to an image tag in their name. Remove old `amp-base-*` templates when you roll out a new tag.
 
 ## Docker Cloud limitations
 
@@ -352,6 +437,7 @@ state/melon-sbx/    state/work-sbx/
 - An image-ref sandbox takes no kits, so the dispatcher passes no agent name.
 - `sbx exec` has no detach flag. The bootstrap uses `setsid` and a redirect, and the dispatcher verifies that the process survives.
 - `sbx exec` does not support `--user`. Bootstrap runs as the image's default `agent` user, which has passwordless sudo.
-- `stop` and `rm` are asynchronous. A sandbox can be `stopping` or `hibernating` for about a minute. The dispatcher polls and retries.
-- Cloud templates can capture disk or memory plus disk. Project snapshots use disk capture, so files survive but processes do not.
+- `stop` and `rm` are asynchronous. A sandbox can be `stopping` or `hibernating` for one to three minutes. The dispatcher returns from pause once the stop is accepted and waits out the hibernation on the next spawn.
+- Cloud templates can capture disk or memory plus disk. Project snapshots use disk capture, so files survive but processes do not. Base checkpoints use memory plus disk, so the next sandbox restores the VM state in a few seconds.
+- A memory checkpoint is tied to its CPU and memory shape. Docker cannot resize it, so one template is needed per orb type.
 - The cloud template list does not include descriptions, so snapshots use deterministic names and `template inspect`.
