@@ -24,6 +24,12 @@ if [[ -z "$IMAGE" ]]; then
 	exit 1
 fi
 
+# Keep a dedicated provider token separate from Amp's shared saved token slot.
+if [[ -n "${AMP_ORB_PROVIDER_TOKEN:-}" ]] && [[ ! "$AMP_ORB_PROVIDER_TOKEN" =~ ^[A-Za-z0-9_-]+$ ]]; then
+	echo "AMP_ORB_PROVIDER_TOKEN has unexpected characters" >&2
+	exit 1
+fi
+
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.local/bin" "$HOME/.config/amp-orbs" "$ROOT/logs"
 sed \
 	-e "s|__AMP_BIN__|$AMP_BIN|g" \
@@ -33,6 +39,12 @@ sed \
 	-e "s|__LAUNCHER__|$LAUNCHER|g" \
 	-e "s|__PATH__|$PATH_VALUE|g" \
 	"$SOURCE" >"$TARGET"
+if [[ -n "${AMP_ORB_PROVIDER_TOKEN:-}" ]]; then
+	chmod 600 "$TARGET"
+	# printf is a builtin: the token never appears in process arguments.
+	printf 'Add :EnvironmentVariables:AMP_ORB_PROVIDER_TOKEN string %s\nSave\nExit\n' \
+		"$AMP_ORB_PROVIDER_TOKEN" | /usr/libexec/PlistBuddy "$TARGET" >/dev/null
+fi
 plutil -lint "$TARGET" >/dev/null
 
 sed \
