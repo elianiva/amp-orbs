@@ -66,7 +66,7 @@ def parse_duration(value: str, default: float = 0.0) -> float:
 		return 0.0
 	if text.isdigit():
 		return float(text)
-	units = {"h": 3600.0, "m": 60.0, "s": 1.0}
+	units = {"d": 86400.0, "h": 3600.0, "m": 60.0, "s": 1.0}
 	total = 0.0
 	number = ""
 	parsed = False
@@ -95,6 +95,10 @@ PAUSE_GRACE = parse_duration(
 # Wait this long before checking that the Amp bootstrap process survived.
 BOOTSTRAP_SETTLE = float(os.environ.get("AMP_ORBS_BOOTSTRAP_SETTLE", "2"))
 SETTLE_BUDGET = float(os.environ.get("AMP_ORBS_SETTLE_BUDGET", "220"))
+# Docker Cloud caps stored sandboxes (50) and counts stopped ones. When a create
+# hits the quota, this many least recently used stopped orbs are evicted. An
+# evicted orb loses its disk; its next spawn boots a fresh sandbox.
+EVICT_BATCH = int(os.environ.get("AMP_ORBS_EVICT_BATCH", "10"))
 LOCK_WAIT = float(os.environ.get("AMP_ORBS_LOCK_WAIT", "30"))
 TIMER_RETRY = 5.0
 # Empty means amp-base-<image tag>; set to off to disable base templates.
@@ -671,6 +675,58 @@ def base_template_name(orb_type: str) -> str:
 	return f"{prefix}-{TEMPLATE_ARCH}-{orb_type}"
 
 
+def last_used_by_name() -> dict[str, float]:
+	"""Map sandbox name to the last spawn or create time recorded in state."""
+	used: dict[str, float] = {}
+	for path in (STATE_DIR / "orbs").glob("*.json"):
+		try:
+			value = json.loads(path.read_text())
+			stamp = datetime.strptime(
+				value["updated_at"], "%Y-%m-%dT%H:%M:%S%z"
+			).timestamp()
+			used[str(value["name"])] = stamp
+		except (OSError, ValueError, KeyError, TypeError):
+			continue
+	return used
+
+
+def evict_stopped(limit: int, protect: str) -> int:
+	"""Remove up to `limit` stopped orbs, least recently used first.
+
+	Only fully stopped sandboxes named amp-* are candidates. Returns how many
+	were removed.
+	"""
+	used = last_used_by_name()
+	candidates = []
+	for item in list_sandboxes():
+		name = str(item.get("name") or "")
+		if name == protect or not name.startswith("amp-"):
+			continue
+		if item.get("status") != "stopped":
+			continue
+		stamp = used.get(name) or parse_time(item.get("created_at")) or 0.0
+		candidates.append((stamp, name, str(item["id"])))
+	removed = 0
+	for _, name, sandbox_id in sorted(candidates)[:limit]:
+		try:
+			with orb_lock(name, wait=0):
+				proc = run(["rm", "--force", sandbox_id], timeout=90, check=False)
+				if proc.returncode == 0 or is_missing(proc.stderr + proc.stdout):
+					remove_state(name)
+					removed += 1
+					log(f"evicted idle stopped sandbox {name} ({sandbox_id})")
+				else:
+					log(f"WARNING could not evict {name}: {tail(proc.stderr or proc.stdout)}")
+		except DispatchError:
+			continue
+	return removed
+
+
+def is_quota_error(text: str) -> bool:
+	lowered = text.lower()
+	return "resource_exhausted" in lowered or "quota" in lowered
+
+
 def create_sandbox(
 	orb_id: str, snapshot_id: str | None, orb_type: str
 ) -> dict[str, Any]:
@@ -759,8 +815,16 @@ def create_sandbox(
 
 	if not source:
 		source = image_source()
+	def run_create(source_args: list[str]) -> subprocess.CompletedProcess:
+		proc = run(create_command(source_args), timeout=240, check=False)
+		if proc.returncode != 0 and is_quota_error(proc.stderr + proc.stdout):
+			log("WARNING sandbox quota reached; evicting least recently used stopped orbs")
+			if evict_stopped(EVICT_BATCH, name):
+				proc = run(create_command(source_args), timeout=240, check=False)
+		return proc
+
 	log(f"creating cloud sandbox {name} from {source[1]} ({orb_type}: {shape})")
-	proc = run(create_command(source), timeout=240, check=False)
+	proc = run_create(source)
 	if proc.returncode != 0:
 		existing = find_by_name(name)
 		if existing:
@@ -783,7 +847,7 @@ def create_sandbox(
 		# Remove a partially created sandbox before reusing the name.
 		run(["rm", "--force", name], timeout=90, check=False)
 		source = image_source()
-		proc = run(create_command(source), timeout=240, check=False)
+		proc = run_create(source)
 		if proc.returncode != 0:
 			existing = find_by_name(name)
 			if existing:
@@ -1162,6 +1226,7 @@ def spawn(orb_id: str) -> None:
 		log(
 			f"found {info['id']} ({info.get('state')})"
 		)
+		write_state(orb_id, str(info["id"]), str(info.get("name") or sandbox_name(orb_id)))
 	sandbox_id = str(info["id"])
 	_, info = ensure_running(sandbox_id, info)
 	ttl_thread = threading.Thread(

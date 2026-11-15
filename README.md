@@ -276,6 +276,7 @@ Snapshot templates are not deleted with the sandbox because Amp project snapshot
 | `AMP_ORBS_DEFAULT_TYPE` | `medium` | Orb type when `ORB_TYPE` is unset. |
 | `AMP_ORBS_TTL` | `24h` | Initial sandbox TTL. Spawn pushes it back to Docker's 24-hour ceiling. |
 | `AMP_ORBS_PAUSE_GRACE` | `10m` | Keep a paused sandbox warm before stopping it. `0` stops immediately. |
+| `AMP_ORBS_EVICT_BATCH` | `10` | Stopped orbs evicted when a create hits the sandbox quota. |
 | `AMP_ORBS_BOOTSTRAP_SETTLE` | `2` | Seconds to wait before checking for the new bootstrap PID. |
 | `AMP_ORBS_BASE_TEMPLATE_PREFIX` | `amp-base-<image tag>` | Checkpoint name prefix. Set to `off` to disable checkpoints. |
 | `AMP_ORBS_SBX` | auto-detected | Path to `sbx`. |
@@ -283,6 +284,14 @@ Snapshot templates are not deleted with the sandbox because Amp project snapshot
 | `AMP_ORBS_LOGS` | `<root>/logs` | Bootstrap and timer logs. |
 
 `AMP_ORBS_TEMPLATE_SETTLE` (default 20 seconds) is only read by `service/create-base-templates.sh`. It controls how long the source sandbox settles before the checkpoint is saved.
+
+## Sandbox quota
+
+Docker Cloud caps stored sandboxes (50), and stopped sandboxes count. Pause only stops a sandbox, so orbs that Amp never deletes accumulate. The dispatcher evicts them itself:
+
+- If `create` fails with `resource_exhausted`, the dispatcher removes the `AMP_ORBS_EVICT_BATCH` (default 10) least recently used stopped `amp-*` sandboxes and retries once.
+
+Running orbs and orbs whose lock another job holds are never evicted. An evicted thread loses its disk; its next spawn boots a fresh sandbox (or its project snapshot). Idle time comes from `updated_at` in `state/orbs`, which each spawn refreshes, with the sandbox creation time as a fallback.
 
 ## Sandbox naming and lookup
 
