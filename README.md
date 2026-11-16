@@ -13,6 +13,7 @@ A self-hosted Amp orb provider backed by Docker Sandboxes Cloud (`sbx --cloud`).
 | `service/install-macos.sh` | launchd installer. |
 | `service/install-linux.sh` | systemd installer, one profile per instance. |
 | `service/create-base-templates.sh` | Creates per-shape memory checkpoints for fast cold starts. |
+| `service/set-provider-token.sh` | Replaces a revoked provider token for one Linux profile. |
 | `service/com.elianiva.amp-orb-provider.plist` | launchd template. |
 | `service/amp-orb-provider@.service` | systemd template unit. |
 | `state/` | Durable `ORB_ID` to sandbox mapping, plus scheduled stop timers. |
@@ -319,7 +320,25 @@ Check a sandbox's expiry with `sbx --cloud ttl <name> --json`.
 
 ## Provider service
 
-[Setup](#4-install-the-provider-service) installs the service. This section covers removing profiles, installing without the setup script, and running several accounts on one host.
+[Setup](#4-install-the-provider-service) installs the service. This section covers rotating the token, removing profiles, installing without the setup script, and running several accounts on one host.
+
+### Rotate the provider token
+
+If Amp revokes the provider token, generate a new one in **Settings → Orbs** for that profile's provider. On the Linux provider host, run:
+
+```sh
+./service/set-provider-token.sh <profile>
+```
+
+The script reads the token from the terminal without echo, updates the unit's `EnvironmentFile` at mode `600`, restarts `amp-orb-provider@<profile>`, and waits for `Orb provider started` in the journal. It asks systemd which env file the unit uses, so it also works when the installer used a custom path. The restart briefly makes the provider unavailable; retry the thread after a few seconds.
+
+To feed the token from a secret manager instead of a terminal, pipe one line:
+
+```sh
+./service/set-provider-token.sh <profile> < /secure/path/to/token
+```
+
+Set `DRY_RUN=1` to check the profile, env path, and token shape without changing anything. Do not pass the token as a command-line argument or commit it. On macOS, the provider token is managed by the Amp CLI; use the Amp settings or `amp orb provider create` instead.
 
 ### Reset
 
